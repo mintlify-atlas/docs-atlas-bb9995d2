@@ -1,0 +1,318 @@
+---
+title: "BacktestConfig"
+description: "Configuration for backtest engine including latency, fees, risk, and execution parameters"
+---
+
+## Overview
+
+The `BacktestConfig` struct defines all configuration parameters for running a backtest, including initial capital, latency simulation, fee structure, risk management rules, execution realism, and output settings.
+
+Source: `nano-backtest/src/config.rs`
+
+## BacktestConfig
+
+```rust
+pub struct BacktestConfig {
+    pub initial_capital: f64,
+    pub latency: LatencyConfig,
+    pub fees: FeeConfig,
+    pub risk: RiskConfig,
+    pub execution: ExecutionConfig,
+    pub output: OutputConfig,
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `initial_capital` | `f64` | Starting capital in dollars |
+| `latency` | `LatencyConfig` | Latency simulation parameters |
+| `fees` | `FeeConfig` | Trading fee structure |
+| `risk` | `RiskConfig` | Risk management settings |
+| `execution` | `ExecutionConfig` | Execution simulation parameters |
+| `output` | `OutputConfig` | Logging and recording settings |
+
+### Constructors
+
+#### `default`
+
+Creates a balanced configuration suitable for most backtests.
+
+```rust
+impl Default for BacktestConfig
+```
+
+**Defaults:**
+- Initial capital: $1,000,000
+- Latency: 100μs order, 50μs market data
+- CME standard fees
+- Conservative risk limits
+
+#### `aggressive_hft`
+
+Configuration optimized for high-frequency trading strategies.
+
+```rust
+pub fn aggressive_hft() -> Self
+```
+
+**Features:**
+- Ultra-low latency: 50μs order, 10μs market data
+- Tight risk limits (max position: 50 contracts)
+- 4% max drawdown
+- High jitter variance (5μs)
+
+**Example:**
+```rust
+let config = BacktestConfig::aggressive_hft();
+let engine = BacktestEngine::new(config);
+```
+
+#### `conservative`
+
+Configuration for strategy validation with pessimistic assumptions.
+
+```rust
+pub fn conservative() -> Self
+```
+
+**Features:**
+- Higher latency: 200μs order, 50μs market data
+- Increased fees (20% buffer)
+- Stricter risk limits (3% max drawdown)
+- More conservative fill probability (70% decay)
+- Partial fills more likely (40%)
+
+**Use case:** Stress testing strategies under adverse conditions
+
+## LatencyConfig
+
+Defines latency simulation parameters.
+
+```rust
+pub struct LatencyConfig {
+    pub order_latency_ns: u64,
+    pub market_data_latency_ns: u64,
+    pub ack_latency_ns: u64,
+    pub jitter_ns: u64,
+    pub use_random_jitter: bool,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `order_latency_ns` | `u64` | 100,000 | Order submission latency (nanoseconds) |
+| `market_data_latency_ns` | `u64` | 50,000 | Market data reception latency (ns) |
+| `ack_latency_ns` | `u64` | 100,000 | Order acknowledgment latency (ns) |
+| `jitter_ns` | `u64` | 10,000 | Latency jitter standard deviation (ns) |
+| `use_random_jitter` | `bool` | `true` | Enable random jitter simulation |
+
+**Example:**
+```rust
+let latency = LatencyConfig {
+    order_latency_ns: 50_000,  // 50 microseconds
+    market_data_latency_ns: 25_000,
+    ack_latency_ns: 60_000,
+    jitter_ns: 5_000,
+    use_random_jitter: true,
+};
+```
+
+See [LatencyConfig](/api/config/latency) for detailed documentation.
+
+## FeeConfig
+
+Defines trading fee structure (typically for CME futures).
+
+```rust
+pub struct FeeConfig {
+    pub maker_fee: f64,
+    pub taker_fee: f64,
+    pub exchange_fee: f64,
+    pub clearing_fee: f64,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `maker_fee` | `f64` | 0.10 | Maker rebate/fee per contract |
+| `taker_fee` | `f64` | 0.52 | Taker fee per contract |
+| `exchange_fee` | `f64` | 0.42 | Exchange fee per contract |
+| `clearing_fee` | `f64` | 0.02 | Clearing fee per contract |
+
+### Methods
+
+#### `calculate_fee`
+
+Calculates total fee for a trade.
+
+```rust
+pub fn calculate_fee(&self, quantity: u32, is_maker: bool) -> f64
+```
+
+**Parameters:**
+- `quantity`: Number of contracts
+- `is_maker`: Whether the trade provides liquidity (maker) or removes it (taker)
+
+**Returns:** Total fee in dollars
+
+**Example:**
+```rust
+let fees = FeeConfig::default();
+let maker_cost = fees.calculate_fee(10, true);   // Maker: ~$5.40
+let taker_cost = fees.calculate_fee(10, false);  // Taker: ~$9.60
+```
+
+## RiskConfig
+
+Defines risk management rules and limits.
+
+```rust
+pub struct RiskConfig {
+    pub max_position: i64,
+    pub max_order_size: u32,
+    pub max_drawdown_pct: f64,
+    pub max_daily_loss: f64,
+    pub max_open_orders: usize,
+    pub enable_kill_switch: bool,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_position` | `i64` | 100 | Maximum net position (contracts) |
+| `max_order_size` | `u32` | 20 | Maximum single order size |
+| `max_drawdown_pct` | `f64` | 0.05 | Maximum drawdown (5%) before stop |
+| `max_daily_loss` | `f64` | 100,000.0 | Maximum daily loss before stop ($) |
+| `max_open_orders` | `usize` | 20 | Maximum concurrent open orders |
+| `enable_kill_switch` | `bool` | `true` | Enable automatic kill switch |
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_position: 50,
+    max_order_size: 10,
+    max_drawdown_pct: 0.03,  // 3%
+    max_daily_loss: 50_000.0,
+    max_open_orders: 10,
+    enable_kill_switch: true,
+};
+```
+
+See [RiskConfig](/api/config/risk) for detailed documentation.
+
+## ExecutionConfig
+
+Defines execution simulation realism parameters.
+
+```rust
+pub struct ExecutionConfig {
+    pub track_queue_position: bool,
+    pub fill_probability_decay: f64,
+    pub partial_fill_probability: f64,
+    pub min_partial_fill: u32,
+    pub simulate_adverse_selection: bool,
+    pub adverse_selection_prob: f64,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `track_queue_position` | `bool` | `true` | Track order queue position |
+| `fill_probability_decay` | `f64` | 0.9 | Fill probability decay with queue depth |
+| `partial_fill_probability` | `f64` | 0.2 | Probability of partial fills (20%) |
+| `min_partial_fill` | `u32` | 1 | Minimum partial fill size |
+| `simulate_adverse_selection` | `bool` | `true` | Simulate adverse selection |
+| `adverse_selection_prob` | `f64` | 0.1 | Probability of adverse fill (10%) |
+
+**Details:**
+- `fill_probability_decay`: Lower values make fills less likely for orders behind in queue
+- `simulate_adverse_selection`: When enabled, limit orders at BBO have higher chance of filling when price moves against them
+
+## OutputConfig
+
+Defines logging and data recording settings.
+
+```rust
+pub struct OutputConfig {
+    pub verbosity: u8,
+    pub record_tick_pnl: bool,
+    pub record_fills: bool,
+    pub record_orders: bool,
+    pub snapshot_interval: usize,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `verbosity` | `u8` | 1 | Log level (0-3) |
+| `record_tick_pnl` | `bool` | `false` | Record P&L at every tick |
+| `record_fills` | `bool` | `true` | Record all fill events |
+| `record_orders` | `bool` | `true` | Record order history |
+| `snapshot_interval` | `usize` | 10,000 | Snapshot state every N events |
+
+## Complete Example
+
+```rust
+use nano_backtest::config::*;
+
+// Build custom configuration
+let config = BacktestConfig {
+    initial_capital: 500_000.0,
+    
+    latency: LatencyConfig {
+        order_latency_ns: 75_000,
+        market_data_latency_ns: 30_000,
+        ack_latency_ns: 80_000,
+        jitter_ns: 8_000,
+        use_random_jitter: true,
+    },
+    
+    fees: FeeConfig::default(),
+    
+    risk: RiskConfig {
+        max_position: 50,
+        max_order_size: 10,
+        max_drawdown_pct: 0.04,
+        max_daily_loss: 25_000.0,
+        max_open_orders: 15,
+        enable_kill_switch: true,
+    },
+    
+    execution: ExecutionConfig {
+        track_queue_position: true,
+        fill_probability_decay: 0.85,
+        partial_fill_probability: 0.25,
+        min_partial_fill: 1,
+        simulate_adverse_selection: true,
+        adverse_selection_prob: 0.12,
+    },
+    
+    output: OutputConfig {
+        verbosity: 2,
+        record_tick_pnl: false,
+        record_fills: true,
+        record_orders: true,
+        snapshot_interval: 5000,
+    },
+};
+
+let engine = BacktestEngine::new(config);
+```
+
+## See Also
+
+- [BacktestEngine](/api/backtest/engine) - Using the engine
+- [LatencyConfig](/api/config/latency) - Latency simulation details
+- [RiskConfig](/api/config/risk) - Risk management details

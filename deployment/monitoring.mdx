@@ -1,0 +1,457 @@
+---
+title: Monitoring & Metrics
+description: Monitor NanoARB performance with Prometheus and Grafana for real-time insights
+icon: chart-line
+---
+
+## Overview
+
+NanoARB exposes Prometheus metrics for comprehensive monitoring of trading performance, latency, and system health. The monitoring stack includes Prometheus for metrics collection and Grafana for visualization.
+
+## Architecture
+
+The monitoring stack consists of:
+
+```mermaid
+graph LR
+    A[NanoARB Engine] -->|Scrape :9090/metrics| B[Prometheus]
+    B -->|Query| C[Grafana]
+    C -->|Visualize| D[Dashboards]
+```
+
+- **NanoARB Engine**: Exposes metrics on port 9090
+- **Prometheus**: Scrapes metrics every 1 second and stores time-series data
+- **Grafana**: Provides real-time dashboards and alerting
+
+## Setup
+
+### Starting the Monitoring Stack
+
+<Tabs>
+  <Tab title="With Docker Compose">
+    ```bash
+    # Full stack (engine + monitoring)
+    cd docker
+    docker compose up -d
+    
+    # Monitoring only (for local development)
+    docker compose -f docker-compose-monitoring.yml up -d
+    ```
+  </Tab>
+  
+  <Tab title="Standalone">
+    Start Prometheus:
+    ```bash
+    prometheus --config.file=docker/prometheus.yml
+    ```
+    
+    Start Grafana:
+    ```bash
+    grafana-server --config=/etc/grafana/grafana.ini
+    ```
+  </Tab>
+</Tabs>
+
+### Accessing Dashboards
+
+Once the stack is running:
+
+- **Grafana**: http://localhost:3000
+  - Username: `admin`
+  - Password: `nanoarb`
+- **Prometheus**: http://localhost:9091
+- **Metrics Endpoint**: http://localhost:9090/metrics
+
+## Prometheus Configuration
+
+The Prometheus configuration in `docker/prometheus.yml`:
+
+```yaml
+global:
+  scrape_interval: 1s        # Scrape every second for HFT
+  evaluation_interval: 1s
+  external_labels:
+    monitor: 'nanoarb'
+
+scrape_configs:
+  - job_name: 'nanoarb'
+    static_configs:
+      - targets: ['host.docker.internal:9090']
+    scrape_interval: 1s      # High-frequency scraping
+    metrics_path: /metrics
+```
+
+<Note>
+  The 1-second scrape interval is optimized for high-frequency trading. For longer-term monitoring, increase to 5s or 15s to reduce storage requirements.
+</Note>
+
+**Data retention:**
+- Default: 30 days (configured via `--storage.tsdb.retention.time=30d`)
+- Adjust in docker-compose.yml if you need longer retention
+
+## Available Metrics
+
+NanoARB exposes metrics in the `MetricsRegistry` defined in `crates/nano-gateway/src/metrics.rs`:
+
+### Trading Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `nanoarb_orders_total` | Counter | Total number of orders submitted |
+| `nanoarb_fills_total` | Counter | Total number of fills received |
+| `nanoarb_position` | Gauge | Current net position in contracts |
+| `nanoarb_pnl` | Gauge | Current profit/loss in dollars |
+| `nanoarb_events_total` | Counter | Total events processed by the engine |
+
+### Latency Metrics
+
+All latency metrics are recorded in **nanoseconds** with histogram buckets:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `nanoarb_inference_latency_ns` | Histogram | ML model inference time |
+| `nanoarb_order_latency_ns` | Histogram | Order submission latency |
+| `nanoarb_book_update_latency_ns` | Histogram | Order book update processing time |
+| `nanoarb_event_latency_ns` | Histogram | Event processing latency |
+
+**Histogram buckets:**
+- Range: 100ns to ~100ms
+- Exponential buckets with factor of 2 (20 buckets total)
+- Enables percentile queries (p50, p95, p99)
+
+### Example Queries
+
+<CodeGroup>
+```promql Order Rate
+# Orders per minute
+rate(nanoarb_orders_total_total[1m]) * 60
+```
+
+```promql Fill Ratio
+# Percentage of orders that get filled
+(rate(nanoarb_fills_total_total[5m]) / rate(nanoarb_orders_total_total[5m])) * 100
+```
+
+```promql P99 Inference Latency
+# 99th percentile inference time
+histogram_quantile(0.99, 
+  sum(rate(nanoarb_inference_latency_ns_bucket[1m])) by (le)
+)
+```
+
+```promql Average Position
+# Average position over 5 minutes
+avg_over_time(nanoarb_position[5m])
+```
+</CodeGroup>
+
+## Grafana Dashboards
+
+The default dashboard is located at `grafana/dashboards/main.json` and includes:
+
+### 1. Key Performance Indicators (Top Row)
+
+<CardGroup cols={4}>
+  <Card title="P&L">
+    Current profit/loss in dollars
+  </Card>
+  <Card title="Position">
+    Current net position
+  </Card>
+  <Card title="Orders/min">
+    Order submission rate
+  </Card>
+  <Card title="Fills/min">
+    Fill execution rate
+  </Card>
+</CardGroup>
+
+### 2. Equity Curve
+
+Real-time visualization of cumulative P&L:
+
+```promql
+nanoarb_pnl
+```
+
+Shows your trading performance over time, helping identify profitable and unprofitable periods.
+
+### 3. Inference Latency
+
+Tracks ML model performance with percentiles:
+
+- **p50** (median): Typical inference time
+- **p95**: 95th percentile - most requests complete within this time
+- **p99**: 99th percentile - worst-case latency for optimization
+
+```promql
+# p50
+histogram_quantile(0.50, sum(rate(nanoarb_inference_latency_ns_bucket[1m])) by (le))
+
+# p95
+histogram_quantile(0.95, sum(rate(nanoarb_inference_latency_ns_bucket[1m])) by (le))
+
+# p99
+histogram_quantile(0.99, sum(rate(nanoarb_inference_latency_ns_bucket[1m])) by (le))
+```
+
+<Warning>
+  For HFT strategies, target p99 inference latency under 1 microsecond (1000ns). Higher latencies may result in adverse selection.
+</Warning>
+
+### 4. Position Over Time
+
+Tracks position changes throughout the trading session:
+
+```promql
+nanoarb_position
+```
+
+Useful for:
+- Identifying position accumulation
+- Monitoring inventory risk
+- Verifying position flattening at session end
+
+### 5. Event Processing Rate
+
+Monitors system throughput:
+
+```promql
+rate(nanoarb_events_total_total[1m])
+```
+
+High event rates (>10,000 events/sec) indicate:
+- Heavy market data processing
+- Potential bottlenecks in event loop
+- Need for performance optimization
+
+## Dashboard Configuration
+
+The dashboard is provisioned automatically in `grafana/provisioning/`:
+
+```
+grafana/
+├── provisioning/
+│   ├── dashboards/
+│   │   └── dashboards.yml     # Dashboard provider config
+│   └── datasources/
+│       └── datasources.yml    # Prometheus datasource
+└── dashboards/
+    └── main.json               # Main trading dashboard
+```
+
+### Adding Custom Panels
+
+1. **Navigate to Grafana**: http://localhost:3000
+2. **Open Dashboard**: "NanoARB Trading Dashboard"
+3. **Add Panel**: Click "Add panel" in top-right
+4. **Configure Query**: Use Prometheus queries from examples above
+5. **Save Dashboard**: Exports to JSON for version control
+
+### Custom Dashboard Example
+
+<Accordion title="Sharpe Ratio Panel">
+  ```json
+  {
+    "title": "Sharpe Ratio (Rolling 1h)",
+    "targets": [
+      {
+        "expr": "(avg_over_time(nanoarb_pnl[1h]) - avg_over_time(nanoarb_pnl[1h] offset 1h)) / stddev_over_time(nanoarb_pnl[1h])",
+        "legendFormat": "Sharpe"
+      }
+    ],
+    "type": "stat"
+  }
+  ```
+  
+  Calculates rolling Sharpe ratio based on P&L standard deviation.
+</Accordion>
+
+## Alerting
+
+### Configure Grafana Alerts
+
+<Steps>
+  <Step title="Create Alert Rule">
+    In Grafana, go to **Alerting** → **Alert rules** → **New alert rule**
+  </Step>
+  
+  <Step title="Define Condition">
+    Example: Alert when P&L drops below -$10,000
+    
+    ```promql
+    nanoarb_pnl < -10000
+    ```
+  </Step>
+  
+  <Step title="Configure Notification">
+    Set up notification channels (Slack, email, PagerDuty)
+  </Step>
+  
+  <Step title="Save and Test">
+    Test the alert and save the configuration
+  </Step>
+</Steps>
+
+### Example Alert Rules
+
+<AccordionGroup>
+  <Accordion title="High Latency Alert">
+    Alert when p99 inference latency exceeds 10 microseconds:
+    
+    ```promql
+    histogram_quantile(0.99, 
+      sum(rate(nanoarb_inference_latency_ns_bucket[1m])) by (le)
+    ) > 10000
+    ```
+  </Accordion>
+  
+  <Accordion title="Position Limit Alert">
+    Alert when position exceeds 80% of max:
+    
+    ```promql
+    abs(nanoarb_position) > 40  # Assuming max_position = 50
+    ```
+  </Accordion>
+  
+  <Accordion title="Drawdown Alert">
+    Alert on significant drawdown (requires additional calculation):
+    
+    ```promql
+    (max_over_time(nanoarb_pnl[1d]) - nanoarb_pnl) > 50000
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Metrics Export
+
+### Raw Metrics Format
+
+View raw Prometheus metrics:
+
+```bash
+curl http://localhost:9090/metrics
+```
+
+Example output:
+```
+# HELP nanoarb_orders_total Total number of orders submitted
+# TYPE nanoarb_orders_total counter
+nanoarb_orders_total_total 1542
+
+# HELP nanoarb_pnl Current P&L in dollars
+# TYPE nanoarb_pnl gauge
+nanoarb_pnl 2450.75
+
+# HELP nanoarb_inference_latency_ns Model inference latency in nanoseconds
+# TYPE nanoarb_inference_latency_ns histogram
+nanoarb_inference_latency_ns_bucket{le="100"} 245
+nanoarb_inference_latency_ns_bucket{le="200"} 489
+nanoarb_inference_latency_ns_bucket{le="400"} 723
+...
+```
+
+### Export to CSV
+
+Use Prometheus API to export historical data:
+
+```bash
+# Export P&L for last hour
+curl -G http://localhost:9091/api/v1/query_range \
+  --data-urlencode 'query=nanoarb_pnl' \
+  --data-urlencode 'start='$(date -u -d '1 hour ago' +%s) \
+  --data-urlencode 'end='$(date -u +%s) \
+  --data-urlencode 'step=1s' \
+  | jq -r '.data.result[0].values[] | @csv' > pnl.csv
+```
+
+## Performance Monitoring
+
+### Key Metrics to Watch
+
+<CardGroup cols={2}>
+  <Card title="Inference Latency" icon="gauge-high">
+    Target: &lt;1μs p99
+    
+    Critical for strategy competitiveness
+  </Card>
+  
+  <Card title="Order Latency" icon="clock">
+    Target: &lt;100μs p99
+    
+    Impacts fill probability
+  </Card>
+  
+  <Card title="Event Processing Rate" icon="bolt">
+    Target: >50k events/sec
+    
+    Indicates system capacity
+  </Card>
+  
+  <Card title="Fill Ratio" icon="percent">
+    Target: >80%
+    
+    Measures execution quality
+  </Card>
+</CardGroup>
+
+### Latency Optimization
+
+If latencies are too high:
+
+1. **Check CPU pinning**: Ensure process runs on isolated cores
+2. **Review event loop**: Look for blocking operations
+3. **Profile code**: Use `perf` or `flamegraph` to identify hotspots
+4. **Optimize model**: Reduce inference complexity
+
+See [Production Deployment](/deployment/production) for optimization techniques.
+
+## Troubleshooting
+
+### Metrics Not Appearing
+
+```bash
+# Check if engine is exposing metrics
+curl http://localhost:9090/metrics
+
+# Check Prometheus targets
+open http://localhost:9091/targets
+
+# Verify Prometheus is scraping
+docker compose logs prometheus
+```
+
+### Dashboard Not Loading
+
+```bash
+# Check Grafana logs
+docker compose logs grafana
+
+# Verify datasource connection
+curl http://admin:nanoarb@localhost:3000/api/datasources
+
+# Restart Grafana
+docker compose restart grafana
+```
+
+### High Memory Usage
+
+Prometheus stores metrics in memory. Reduce retention or scrape interval:
+
+```yaml
+# In docker-compose.yml
+command:
+  - '--storage.tsdb.retention.time=7d'  # Reduce from 30d
+  - '--storage.tsdb.retention.size=1GB' # Add size limit
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker" icon="docker" href="/deployment/docker">
+    Docker deployment guide
+  </Card>
+  <Card title="Production" icon="rocket" href="/deployment/production">
+    Production optimization and best practices
+  </Card>
+</CardGroup>

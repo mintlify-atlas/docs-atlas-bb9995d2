@@ -1,0 +1,1005 @@
+---
+title: Data Flow
+description: Detailed walkthrough of how market data flows through NanoARB from CME packet to order execution
+---
+
+## Overview
+
+This document traces a single CME market data packet through the NanoARB system, from raw UDP bytes to a trading decision and order submission. Understanding this data flow is critical for:
+
+- **Performance optimization** - Identifying latency bottlenecks
+- **Debugging** - Tracing data transformations
+- **Strategy development** - Knowing when your code gets called
+- **Feature extraction** - Understanding available data at each stage
+
+## End-to-End Latency Budget
+
+From README.md (lines 221-228), the complete tick-to-trade latency:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                  Tick-to-Trade: 780ns (median)             │
+├────────────────────────────────────────────────────────────┤
+│  1. LOB Update             45ns  [███░░░░░░░░░░░░░░]       │
+│  2. Feature Extraction    120ns  [████████░░░░░░░░░]       │
+│  3. Model Inference       580ns  [███████████████████]     │
+│  4. Signal Generation      35ns  [██░░░░░░░░░░░░░░░]       │
+└────────────────────────────────────────────────────────────┘
+
+                    P95: 950ns    P99: 1.2μs
+```
+
+Let's examine each stage in detail.
+
+---
+
+## Stage 1: Market Data Ingestion
+
+### 1.1 UDP Packet Reception
+
+**Where**: Network interface (kernel/user space)
+
+**What happens**:
+1. CME multicast packet arrives on configured interface (e.g., eth0)
+2. Kernel copies packet to socket buffer
+3. Application reads packet via `tokio::net::UdpSocket`
+
+**Data format**: SBE (Simple Binary Encoding) binary protocol
+
+```
+CME MDP 3.0 Packet Structure:
+┌─────────────────────────────────────────┐
+│ Packet Header (12 bytes)                │
+├─────────────────────────────────────────┤
+│ - Sequence Number (4 bytes)             │
+│ - Sending Time (8 bytes)                │
+├─────────────────────────────────────────┤
+│ Message Header (varies)                 │
+├─────────────────────────────────────────┤
+│ - Block Length (2 bytes)                │
+│ - Template ID (2 bytes)                 │
+│ - Schema ID (2 bytes)                   │
+│ - Version (2 bytes)                     │
+├─────────────────────────────────────────┤
+│ Message Body (varies by template)       │
+│ - MDIncrementalRefreshBook (Template 46)│
+│   - Security ID                         │
+│   - RptSeq                              │
+│   - Num Entries                         │
+│   - Entry: [Price, Qty, Side, Action]   │
+└─────────────────────────────────────────┘
+```
+
+### 1.2 SBE Decoding
+
+**Where**: `nano-feed/src/parser.rs:1`
+
+**Function**: `MdpParser::parse()`
+
+```rust
+impl MdpParser {
+    pub fn parse(&mut self, data: &[u8]) -> FeedResult<MdpMessage> {
+        // Parse header
+        let (remaining, header) = parse_packet_header(data)?;
+        
+        // Match on template ID
+        match header.template_id {
+            46 => parse_book_update(remaining),
+            42 => parse_trade(remaining),
+            4 => parse_channel_reset(remaining),
+            _ => Err(FeedError::UnsupportedTemplate),
+        }
+    }
+}
+```
+
+**Key optimization**: Zero-copy parsing with `nom` combinators
+
+```rust
+// Example nom parser for price field
+fn parse_price(input: &[u8]) -> IResult<&[u8], Price> {
+    map(le_i64, |raw| Price::from_raw(raw))(input)
+}
+```
+
+**Output**: `MdpMessage::BookUpdate`
+
+```rust
+pub struct BookUpdate {
+    pub instrument_id: u32,
+    pub timestamp: Timestamp,
+    pub entries: Vec<BookEntry>,
+}
+
+pub struct BookEntry {
+    pub price: Price,
+    pub quantity: Quantity,
+    pub side: Side,
+    pub action: UpdateAction,  // Add, Delete, Change
+}
+```
+
+**Latency**: ~20-30ns for typical 46-byte message
+
+---
+
+## Stage 2: Order Book Update
+
+### 2.1 Book Reconstruction
+
+**Where**: `nano-lob/src/orderbook.rs:1`
+
+**Function**: `OrderBook::apply_update()`
+
+```rust
+impl OrderBook {
+    pub fn apply_update(&mut self, update: &BookUpdate) {
+        for entry in &update.entries {
+            match entry.action {
+                UpdateAction::Add | UpdateAction::Change => {
+                    let book_side = if entry.side == Side::Buy {
+                        &mut self.bids
+                    } else {
+                        &mut self.asks
+                    };
+                    book_side.insert(entry.price, entry.quantity);
+                }
+                UpdateAction::Delete => {
+                    let book_side = if entry.side == Side::Buy {
+                        &mut self.bids
+                    } else {
+                        &mut self.asks
+                    };
+                    book_side.remove(&entry.price);
+                }
+            }
+        }
+        self.timestamp = update.timestamp;
+    }
+}
+```
+
+**Data structure**: `BTreeMap<Price, Quantity>`
+
+Why `BTreeMap`?
+- O(log n) insert/delete
+- Ordered iteration (best bid/ask at min/max)
+- Cache-friendly for small sizes
+
+**Book state after update**:
+
+```
+Bids (descending):                 Asks (ascending):
+┌─────────┬─────────┐             ┌─────────┬─────────┐
+│  Price  │   Qty   │             │  Price  │   Qty   │
+├─────────┼─────────┤             ├─────────┼─────────┤
+│ 5000.25 │   100   │ ← Best bid  │ 5000.50 │   150   │ ← Best ask
+│ 5000.00 │   250   │             │ 5000.75 │   200   │
+│ 4999.75 │   180   │             │ 5001.00 │   120   │
+│ 4999.50 │   300   │             │ 5001.25 │    80   │
+└─────────┴─────────┘             └─────────┴─────────┘
+
+Mid price: (5000.25 + 5000.50) / 2 = 5000.375
+Spread: 5000.50 - 5000.25 = 0.25 (1 tick)
+```
+
+**Latency**: **45ns median** (P95: 62ns)
+
+### 2.2 Snapshot Capture
+
+**Where**: `nano-lob/src/snapshot.rs:1`
+
+**Function**: `SnapshotRingBuffer::push()`
+
+```rust
+pub struct LobSnapshot {
+    pub timestamp: Timestamp,
+    pub bids: [(Price, Quantity); 20],
+    pub asks: [(Price, Quantity); 20],
+}
+
+impl SnapshotRingBuffer {
+    pub fn push(&mut self, snapshot: LobSnapshot) {
+        self.snapshots[self.cursor] = snapshot;
+        self.cursor = (self.cursor + 1) % self.capacity;
+    }
+}
+```
+
+**Purpose**: Maintain 100-tick history for sequence model input
+
+**Memory layout**: Stack-allocated, cache-friendly
+
+```
+Ring Buffer (capacity=100):
+┌───┬───┬───┬───┬───┬───┬───┬───┐
+│ 0 │ 1 │ 2 │...│ 98│ 99│   │   │
+└───┴───┴───┴───┴───┴───┴───┴───┘
+         ↑
+      cursor
+```
+
+---
+
+## Stage 3: Feature Extraction
+
+### 3.1 LOB Features
+
+**Where**: `nano-lob/src/features.rs:1`
+
+**Function**: `LobFeatureExtractor::extract_all()`
+
+```rust
+impl LobFeatureExtractor {
+    pub fn extract_all(book: &OrderBook) -> Array1<f64> {
+        let mut features = Array1::zeros(40);
+        
+        // Level 1-5 features (20 values)
+        for i in 0..5 {
+            if let Some((bid_p, bid_q)) = book.bid_at_level(i) {
+                features[i * 2] = bid_p.as_f64();
+                features[i * 2 + 1] = bid_q.0 as f64;
+            }
+            if let Some((ask_p, ask_q)) = book.ask_at_level(i) {
+                features[10 + i * 2] = ask_p.as_f64();
+                features[10 + i * 2 + 1] = ask_q.0 as f64;
+            }
+        }
+        
+        // Derived features (20 values)
+        features[20] = Self::microprice(book);
+        features[21] = Self::book_imbalance(book, 5);
+        features[22] = Self::spread(book);
+        features[23] = Self::mid_price_return(book);
+        // ... more features
+        
+        features
+    }
+}
+```
+
+**Feature vector** (40 dimensions):
+
+```
+Index  Feature                      Example Value
+───────────────────────────────────────────────────
+0-1    Bid level 0 (price, qty)     [5000.25, 100]
+2-3    Bid level 1                  [5000.00, 250]
+4-5    Bid level 2                  [4999.75, 180]
+6-7    Bid level 3                  [4999.50, 300]
+8-9    Bid level 4                  [4999.25, 220]
+10-11  Ask level 0 (price, qty)     [5000.50, 150]
+12-13  Ask level 1                  [5000.75, 200]
+14-15  Ask level 2                  [5001.00, 120]
+16-17  Ask level 3                  [5001.25,  80]
+18-19  Ask level 4                  [5001.50, 100]
+20     Microprice                    5000.38
+21     Book imbalance               -0.12
+22     Spread (bps)                  5.0
+23     Mid price return              0.0002
+24     Order flow imbalance          15.0
+25     VPIN                          0.35
+26-39  Derived features             ...
+```
+
+### 3.2 Key Feature Calculations
+
+#### Microprice
+
+**Definition**: Volume-weighted mid price
+
+```rust
+pub fn microprice(book: &OrderBook) -> f64 {
+    let (bid_p, bid_q) = book.best_bid().unwrap();
+    let (ask_p, ask_q) = book.best_ask().unwrap();
+    
+    let bid_p = bid_p.as_f64();
+    let ask_p = ask_p.as_f64();
+    let bid_q = bid_q.0 as f64;
+    let ask_q = ask_q.0 as f64;
+    
+    (bid_p * ask_q + ask_p * bid_q) / (bid_q + ask_q)
+}
+```
+
+**Example**:
+```
+Bid: $5000.25 @ 100
+Ask: $5000.50 @ 150
+Microprice = (5000.25 * 150 + 5000.50 * 100) / (100 + 150)
+           = (750037.5 + 500050) / 250
+           = 5000.35
+```
+
+#### Order Flow Imbalance (OFI)
+
+**Definition**: Net change in bid vs ask volume
+
+```rust
+pub fn order_flow_imbalance(current: &OrderBook, previous: &OrderBook) -> f64 {
+    let bid_delta = current.bid_depth(5) - previous.bid_depth(5);
+    let ask_delta = current.ask_depth(5) - previous.ask_depth(5);
+    
+    (bid_delta as f64) - (ask_delta as f64)
+}
+```
+
+**Interpretation**:
+- OFI > 0: More buying pressure (bullish)
+- OFI < 0: More selling pressure (bearish)
+
+#### VPIN (Volume-Synchronized Probability of Informed Trading)
+
+**Definition**: Imbalance in signed volume
+
+```rust
+pub fn vpin(snapshots: &[LobSnapshot]) -> f64 {
+    let mut buy_volume = 0.0;
+    let mut sell_volume = 0.0;
+    
+    for i in 1..snapshots.len() {
+        let prev = &snapshots[i - 1];
+        let curr = &snapshots[i];
+        
+        if curr.mid_price() > prev.mid_price() {
+            buy_volume += curr.volume();
+        } else {
+            sell_volume += curr.volume();
+        }
+    }
+    
+    (buy_volume - sell_volume).abs() / (buy_volume + sell_volume)
+}
+```
+
+**Range**: [0, 1], higher values indicate more informed trading
+
+**Latency for all features**: **120ns median** (P95: 145ns)
+
+---
+
+## Stage 4: ML Model Inference
+
+### 4.1 Input Preparation
+
+**Where**: `nano-model/src/lib.rs`
+
+**Function**: `SignalModel::predict()`
+
+**Input shape**: `(batch=1, seq_len=100, features=40)`
+
+```rust
+let snapshots = ring_buffer.as_tensor();  // (100, 40)
+let input = snapshots.insert_axis(Axis(0));  // (1, 100, 40)
+```
+
+**Tensor layout**:
+
+```
+Batch dimension (1):
+  |
+  v
+┌───────────────────────────────────────────────────┐
+│ Sequence (100 timesteps)                          │
+│ ┌──────────────────────────────────────────────┐  │
+│ │ Features (40 values per timestep)            │  │
+│ │ [bid_0_p, bid_0_q, ..., microprice, ...]     │  │
+│ ├──────────────────────────────────────────────┤  │
+│ │ [bid_0_p, bid_0_q, ..., microprice, ...]     │  │
+│ ├──────────────────────────────────────────────┤  │
+│ │                    ...                       │  │
+│ └──────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────┘
+```
+
+### 4.2 Mamba Model Architecture
+
+From README.md (lines 295-323):
+
+```
+Input: (1, 100, 40)
+   |
+   v
+┌─────────────────────────┐
+│  Linear Projection      │  → (1, 100, 128)
+│  + LayerNorm            │
+└────────┬────────────────┘
+         |
+         v
+┌─────────────────────────┐
+│  Mamba Block 1          │
+│  - Conv1D (kernel=4)    │  SSM with selective state
+│  - SSM (S4)             │  space mechanism
+│  - SiLU Gating          │
+└────────┬────────────────┘
+         |
+         v
+┌─────────────────────────┐
+│  Mamba Block 2          │
+└────────┬────────────────┘
+         |
+         v
+┌─────────────────────────┐
+│  Mamba Block 3          │
+└────────┬────────────────┘
+         |
+         v
+┌─────────────────────────┐
+│  Mamba Block 4          │
+└────────┬────────────────┘
+         |
+         v
+┌─────────────────────────┐
+│  Output Heads           │
+│  - Horizon 1: 1-tick    │  → (1, 3, 3)
+│  - Horizon 2: 5-tick    │     [up, flat, down]
+│  - Horizon 3: 10-tick   │     probabilities
+└─────────────────────────┘
+```
+
+**Why Mamba?**
+- 10-50x faster than Transformers (no quadratic attention)
+- Better at long sequences (100+ timesteps)
+- State space models capture temporal dynamics
+- Sub-microsecond inference
+
+### 4.3 Output Interpretation
+
+**Output shape**: `(1, 3, 3)` = (batch, horizons, classes)
+
+```
+Horizon 1 (1-tick, ~100ms):
+┌──────┬───────┬───────┐
+│  Up  │ Flat  │ Down  │
+├──────┼───────┼───────┤
+│ 0.65 │ 0.20  │ 0.15  │ ← Softmax probabilities
+└──────┴───────┴───────┘
+
+Horizon 2 (5-tick, ~500ms):
+┌──────┬───────┬───────┐
+│  Up  │ Flat  │ Down  │
+├──────┼───────┼───────┤
+│ 0.55 │ 0.25  │ 0.20  │
+└──────┴───────┴───────┘
+
+Horizon 3 (10-tick, ~1s):
+┌──────┬───────┬───────┐
+│  Up  │ Flat  │ Down  │
+├──────┼───────┼───────┤
+│ 0.45 │ 0.30  │ 0.25  │
+└──────┴───────┴───────┘
+```
+
+**Signal extraction**:
+
+```rust
+let prediction = output[[0, 0, 0]] - output[[0, 0, 2]];  // P(up) - P(down)
+let confidence = output[[0, 0, 0]].max(output[[0, 0, 2]]);  // Max probability
+```
+
+**Latency**: **580ns median** (P95: 720ns, P99: 890ns)
+
+---
+
+## Stage 5: Strategy Decision
+
+### 5.1 Market Maker Quote Calculation
+
+**Where**: `nano-strategy/src/market_maker.rs:1`
+
+**Function**: `MarketMakerStrategy::on_market_data()`
+
+```rust
+impl Strategy for MarketMakerStrategy {
+    fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order> {
+        let mid = book.mid_price().unwrap();
+        let tick_size = Price::from_ticks(1, 25);
+        
+        // 1. Base spread from config
+        let base_spread = tick_size * self.config.base_spread_ticks;
+        
+        // 2. ML signal adjustment
+        let signal_skew = if self.config.use_ml_signal {
+            self.get_ml_signal() * tick_size * 2
+        } else {
+            Price::ZERO
+        };
+        
+        // 3. Inventory skew
+        let inventory_skew = Price::from_f64(
+            self.config.skew_factor * self.position as f64 * tick_size.as_f64()
+        );
+        
+        // 4. Calculate quotes
+        let bid_price = mid - base_spread / 2 + signal_skew - inventory_skew;
+        let ask_price = mid + base_spread / 2 + signal_skew - inventory_skew;
+        
+        vec![
+            Order {
+                id: OrderId::new(),
+                instrument_id: self.instrument_id,
+                side: Side::Buy,
+                price: bid_price,
+                quantity: Quantity::new(self.config.order_size),
+                timestamp: Timestamp::now(),
+                order_type: OrderType::Limit,
+            },
+            Order {
+                id: OrderId::new(),
+                instrument_id: self.instrument_id,
+                side: Side::Sell,
+                price: ask_price,
+                quantity: Quantity::new(self.config.order_size),
+                timestamp: Timestamp::now(),
+                order_type: OrderType::Limit,
+            },
+        ]
+    }
+}
+```
+
+**Example calculation**:
+
+```
+Inputs:
+  Mid price: $5000.375
+  Base spread: 2 ticks = $0.50
+  ML signal: +0.65 (bullish) → +2 ticks = $0.50
+  Position: +10 contracts
+  Skew factor: 0.5
+  Inventory skew: 0.5 * 10 * $0.25 = $1.25
+
+Calculation:
+  Bid: 5000.375 - 0.25 + 0.50 - 1.25 = 5000.375
+  Ask: 5000.375 + 0.25 + 0.50 - 1.25 = 5000.875
+
+Orders:
+  Buy  5 @ $5000.375
+  Sell 5 @ $5000.875
+```
+
+**Interpretation**:
+- ML signal is bullish, so both quotes shifted up by $0.50
+- Long position (+10), so quotes shifted down by $1.25 to reduce inventory
+- Net effect: Willing to sell at higher price, buy at fair value
+
+**Latency**: **35ns** (pure computation, no I/O)
+
+### 5.2 Risk Checks
+
+**Where**: `nano-backtest/src/risk.rs:1`
+
+**Function**: `RiskManager::check_order()`
+
+```rust
+impl RiskManager {
+    pub fn check_order(&self, order: &Order, current_position: i64) -> Result<()> {
+        // Position limit
+        let new_position = current_position + order.signed_quantity();
+        if new_position.abs() > self.config.max_position {
+            return Err(Error::PositionLimitExceeded);
+        }
+        
+        // Order size limit
+        if order.quantity.0 > self.config.max_order_size {
+            return Err(Error::OrderSizeTooLarge);
+        }
+        
+        // Drawdown limit
+        let current_dd = (self.peak_pnl - self.current_pnl) / self.peak_pnl.abs();
+        if current_dd > self.config.max_drawdown_pct {
+            return Err(Error::DrawdownLimitBreached);
+        }
+        
+        Ok(())
+    }
+}
+```
+
+**Checks performed**:
+1. Position limit (e.g., max ±50 contracts)
+2. Order size (e.g., max 10 per order)
+3. Drawdown threshold (e.g., max 6% from peak)
+4. Daily loss limit (e.g., max $100k per day)
+
+If any check fails, order is rejected and strategy is notified.
+
+---
+
+## Stage 6: Order Submission
+
+### 6.1 Event Scheduling
+
+**Where**: `nano-backtest/src/engine.rs:215`
+
+**Function**: `BacktestEngine::on_market_data()`
+
+```rust
+for order in orders {
+    // Check risk
+    if let Err(e) = self.risk.check_order(&order, position) {
+        tracing::warn!("Order rejected by risk: {}", e);
+        continue;
+    }
+    
+    // Schedule order with latency
+    let arrival_time = self.latency.order_arrival_time(self.current_time);
+    self.schedule_event(arrival_time, EventType::OrderSubmit { order });
+}
+```
+
+**Latency simulation**:
+
+```rust
+impl LatencySimulator {
+    pub fn order_arrival_time(&self, current_time: Timestamp) -> Timestamp {
+        let latency_ns = self.order_latency_ns
+            + thread_rng().gen_range(0..self.jitter_ns);
+        current_time + Duration::from_nanos(latency_ns)
+    }
+}
+```
+
+**Example**:
+```
+Current time:    T₀ = 1,000,000,000 ns
+Order latency:   100,000 ns (100 μs)
+Jitter:          ±10,000 ns (±10 μs)
+Arrival time:    T₀ + 105,234 ns = 1,000,105,234 ns
+```
+
+### 6.2 Exchange Matching
+
+**Where**: `nano-backtest/src/execution.rs:1`
+
+**Function**: `SimulatedExchange::submit_order()`
+
+```rust
+impl SimulatedExchange {
+    pub fn submit_order(&mut self, order: Order, timestamp: Timestamp) -> OrderId {
+        let order_id = order.id;
+        
+        // Add to active orders
+        self.active_orders.insert(order_id, order.clone());
+        
+        // Calculate fee
+        let fee = self.fee_model.calculate_fee(
+            order.price,
+            order.quantity,
+            true,  // Maker (assuming limit order)
+            order.side,
+        );
+        
+        // Estimate queue position
+        let queue_pos = self.estimate_queue_position(&order);
+        self.queue_positions.insert(order_id, queue_pos);
+        
+        order_id
+    }
+}
+```
+
+**Queue position estimation**:
+
+```rust
+fn estimate_queue_position(&self, order: &Order) -> usize {
+    // Orders behind existing volume at same price level
+    let existing_qty = self.book.quantity_at_price(order.price, order.side);
+    existing_qty.0 as usize
+}
+```
+
+**Fill simulation**:
+
+```rust
+pub fn match_orders(&mut self, book: &OrderBook, timestamp: Timestamp) -> Vec<Fill> {
+    let mut fills = vec![];
+    
+    for (order_id, order) in &self.active_orders {
+        // Check if price crossed
+        let should_fill = match order.side {
+            Side::Buy => {
+                book.best_ask().map_or(false, |(ask, _)| order.price >= ask)
+            }
+            Side::Sell => {
+                book.best_bid().map_or(false, |(bid, _)| order.price <= bid)
+            }
+        };
+        
+        if should_fill {
+            // Estimate fill probability based on queue position
+            let queue_pos = self.queue_positions[order_id];
+            let level_qty = book.quantity_at_price(order.price, order.side).0 as usize;
+            let fill_prob = self.fill_model.fill_probability(queue_pos, level_qty);
+            
+            if thread_rng().gen::<f64>() < fill_prob {
+                fills.push(Fill {
+                    order_id: *order_id,
+                    price: order.price,
+                    quantity: order.quantity,
+                    side: order.side,
+                    timestamp,
+                    is_maker: true,
+                });
+            }
+        }
+    }
+    
+    fills
+}
+```
+
+### 6.3 Fill Notification
+
+**Where**: `nano-backtest/src/engine.rs:240`
+
+```rust
+fn on_fill<S: Strategy>(&mut self, fill: Fill, strategy: &mut S) {
+    // Update position
+    self.positions.apply_fill_for_instrument(self.instrument_id, &fill);
+    
+    // Record metrics
+    self.metrics.record_fill(&fill);
+    
+    // Notify strategy
+    strategy.on_fill(&fill);
+    
+    // Update equity curve
+    let total_pnl = self.positions.total_pnl(&self.current_prices);
+    self.stats.add_equity_point(self.current_time.as_nanos(), total_pnl);
+}
+```
+
+**Position update**:
+
+```rust
+impl PositionTracker {
+    pub fn apply_fill(&mut self, instrument_id: u32, fill: &Fill) {
+        let signed_qty = match fill.side {
+            Side::Buy => fill.quantity.0 as i64,
+            Side::Sell => -(fill.quantity.0 as i64),
+        };
+        
+        let position = self.positions.entry(instrument_id).or_insert(0);
+        let prev_position = *position;
+        *position += signed_qty;
+        
+        // Update realized P&L if crossing zero
+        if prev_position.signum() != position.signum() {
+            let closed_qty = prev_position.abs().min(signed_qty.abs());
+            let avg_entry = self.avg_entry_prices[&instrument_id];
+            let pnl = (fill.price.as_f64() - avg_entry) * closed_qty as f64;
+            self.realized_pnl += pnl;
+        }
+    }
+}
+```
+
+---
+
+## Complete Event Timeline
+
+Putting it all together, here's a complete tick-to-trade timeline:
+
+```
+T₀:        Market data packet arrives
+           ├─ UDP reception: kernel → userspace
+           └─ Event: MarketData scheduled at T₀
+
+T₀+0ns:    EventQueue pops MarketData event
+           └─ BacktestEngine::on_market_data()
+
+T₀+20ns:   SBE decoding complete
+           └─ BookUpdate created
+
+T₀+45ns:   Order book updated
+           └─ Snapshot captured to ring buffer
+
+T₀+165ns:  Feature extraction complete (45 + 120)
+           └─ Array1<f64> with 40 features
+
+T₀+745ns:  ML inference complete (165 + 580)
+           └─ Prediction: [0.65, 0.20, 0.15]
+
+T₀+780ns:  Strategy decision complete (745 + 35)
+           └─ Orders: [Buy 5 @ 5000.375, Sell 5 @ 5000.875]
+
+T₀+780ns:  Risk checks pass
+           └─ Orders scheduled with latency
+
+T₀+100μs:  Event: OrderSubmit for buy order
+           └─ SimulatedExchange::submit_order()
+           └─ Queue position: 50
+           └─ Event: OrderAck scheduled at T₀+200μs
+
+T₀+100μs:  Event: OrderSubmit for sell order
+           └─ Similar processing
+
+T₀+200μs:  Event: OrderAck for both orders
+           └─ Strategy::on_order_ack() called
+
+T₀+500μs:  Next market data tick arrives
+           └─ Book moves, price crosses our buy order
+           └─ Fill probability: 80% (queue cleared)
+           └─ Random draw: 0.65 < 0.80 → FILLED
+           └─ Event: OrderFill scheduled at T₀+550μs
+
+T₀+550μs:  Event: OrderFill
+           └─ Position: +5 contracts
+           └─ Realized P&L: $0 (no close)
+           └─ Strategy::on_fill() called
+```
+
+**Total latency from tick to order**: **780ns** (within budget)
+
+**Total latency from tick to acknowledgment**: **~100μs** (network latency)
+
+**Total latency from tick to fill**: **~500μs** (depends on market)
+
+---
+
+## Performance Profiling
+
+### Benchmarking Individual Components
+
+Each crate includes Criterion.rs benchmarks:
+
+```bash
+# Benchmark LOB updates
+cargo bench -p nano-lob orderbook
+
+# Benchmark feature extraction
+cargo bench -p nano-lob features
+
+# Benchmark model inference
+cargo bench -p nano-model inference
+```
+
+**Sample output**:
+
+```
+orderbook/update        time:   [44.2 ns 45.1 ns 46.3 ns]
+features/microprice     time:   [8.4 ns 8.6 ns 8.9 ns]
+features/extract_all    time:   [118.7 ns 120.3 ns 122.1 ns]
+inference/mamba         time:   [576.2 ns 582.1 ns 589.3 ns]
+```
+
+### Flamegraph Generation
+
+For detailed profiling:
+
+```bash
+# Install profiling tools
+cargo install flamegraph
+
+# Run with profiling
+cargo flamegraph --bench orderbook
+
+# Output: flamegraph.svg
+```
+
+**Typical flamegraph** shows 75% of time in ML inference, 15% in feature extraction, 10% in other.
+
+---
+
+## Optimization Techniques
+
+### 1. SIMD Vectorization
+
+Feature extraction uses SIMD for parallel computation:
+
+```rust
+use std::simd::*;
+
+fn vectorized_book_imbalance(bids: &[f64], asks: &[f64]) -> f64 {
+    let bid_vec = f64x4::from_slice(bids);
+    let ask_vec = f64x4::from_slice(asks);
+    let diff = bid_vec - ask_vec;
+    let sum = bid_vec + ask_vec;
+    (diff / sum).reduce_sum()
+}
+```
+
+### 2. Lock-Free Data Structures
+
+Crossbeam channels for inter-thread communication:
+
+```rust
+let (tx, rx) = crossbeam_channel::bounded(1024);
+
+// Market data thread
+tx.send(BookUpdate { ... })?;
+
+// Strategy thread
+let update = rx.recv()?;
+```
+
+### 3. Memory Pooling
+
+Pre-allocate objects to avoid allocation overhead:
+
+```rust
+struct OrderPool {
+    pool: Vec<Order>,
+    free_list: Vec<usize>,
+}
+
+impl OrderPool {
+    fn acquire(&mut self) -> &mut Order {
+        let idx = self.free_list.pop().unwrap();
+        &mut self.pool[idx]
+    }
+}
+```
+
+### 4. Compile-Time Optimizations
+
+```toml
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+target-cpu = "native"  # Use CPU-specific instructions
+```
+
+---
+
+## Monitoring & Debugging
+
+### Tracing Events
+
+Structured logging throughout the pipeline:
+
+```rust
+use tracing::{debug, info, warn, error, span, Level};
+
+let span = span!(Level::DEBUG, "orderbook_update", instrument_id = %id);
+let _enter = span.enter();
+
+debug!(entries = entries.len(), "Applying book update");
+book.apply_update(&update);
+debug!(best_bid = ?book.best_bid(), best_ask = ?book.best_ask(), "Update complete");
+```
+
+**Output** (JSON format for log aggregation):
+
+```json
+{
+  "timestamp": "2026-03-04T10:00:00.123456Z",
+  "level": "DEBUG",
+  "target": "nano_lob::orderbook",
+  "span": {"name": "orderbook_update", "instrument_id": 1},
+  "fields": {"entries": 3},
+  "message": "Applying book update"
+}
+```
+
+### Metrics Export
+
+Prometheus metrics at http://localhost:9090/metrics:
+
+```
+# HELP nanoarb_lob_update_duration_ns LOB update latency
+# TYPE nanoarb_lob_update_duration_ns histogram
+nanoarb_lob_update_duration_ns_bucket{le="50"} 7234
+nanoarb_lob_update_duration_ns_bucket{le="100"} 9512
+nanoarb_lob_update_duration_ns_bucket{le="200"} 9876
+nanoarb_lob_update_duration_ns_sum 445678
+nanoarb_lob_update_duration_ns_count 10000
+
+# HELP nanoarb_inference_duration_ns Model inference latency
+# TYPE nanoarb_inference_duration_ns histogram
+nanoarb_inference_duration_ns_bucket{le="500"} 1234
+nanoarb_inference_duration_ns_bucket{le="1000"} 8765
+nanoarb_inference_duration_ns_sum 5876543
+nanoarb_inference_duration_ns_count 10000
+```
+
+---
+
+## Next Steps
+
+- [Architecture Overview](/architecture/overview) - System design principles
+- [Crate Reference](/architecture/crates) - Detailed crate documentation
+- [Strategy Development](/strategies/overview) - Build custom strategies
+- [Performance Tuning](/advanced/performance) - Optimize latency

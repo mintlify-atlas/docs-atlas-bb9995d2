@@ -1,0 +1,726 @@
+---
+title: Core Types
+description: Fundamental data types for high-frequency trading operations
+icon: cube
+---
+
+## Overview
+
+NanoARB uses fixed-point arithmetic and zero-copy serialization for maximum performance in HFT applications. All core types are optimized for nanosecond-level precision and deterministic behavior.
+
+## Price
+
+Fixed-point price representation that avoids floating-point errors.
+
+### Definition
+
+```rust
+pub struct Price(i64);
+```
+
+Uses `i64` internally to represent prices in the smallest tick unit. This ensures deterministic arithmetic and avoids floating-point precision issues.
+
+<ParamField path="Price::ZERO" type="Price">
+  Zero price constant
+</ParamField>
+
+<ParamField path="Price::MAX" type="Price">
+  Maximum price constant (i64::MAX)
+</ParamField>
+
+<ParamField path="Price::MIN" type="Price">
+  Minimum price constant (i64::MIN)
+</ParamField>
+
+### Constructors
+
+<ParamField path="from_raw" type="fn(ticks: i64) -> Price">
+  Create a price from raw tick value
+  
+  ```rust
+  let price = Price::from_raw(50025);
+  assert_eq!(price.raw(), 50025);
+  ```
+</ParamField>
+
+<ParamField path="from_ticks" type="fn(value: i64, decimals: u8) -> Price">
+  Create a price from ticks and decimal places
+  
+  ```rust
+  // Create a price of $500.25 with 2 decimal places
+  let price = Price::from_ticks(50025, 2);
+  ```
+</ParamField>
+
+<ParamField path="from_f64" type="fn(value: f64, tick_size: f64) -> Price">
+  Create a price from a floating-point value with specified tick size
+  
+  ```rust
+  let price = Price::from_f64(500.25, 0.01);
+  assert_eq!(price.raw(), 50025);
+  ```
+</ParamField>
+
+### Methods
+
+<ResponseField name="raw" type="i64">
+  Get the raw tick value
+  
+  ```rust
+  let price = Price::from_raw(50025);
+  assert_eq!(price.raw(), 50025);
+  ```
+</ResponseField>
+
+<ResponseField name="as_f64" type="f64">
+  Convert to f64 (assumes tick size of 0.01)
+  
+  ```rust
+  let price = Price::from_raw(50025);
+  assert_eq!(price.as_f64(), 500.25);
+  ```
+</ResponseField>
+
+<ResponseField name="as_f64_with_tick" type="f64">
+  Convert to f64 with specified tick size
+  
+  ```rust
+  let price = Price::from_raw(50025);
+  assert_eq!(price.as_f64_with_tick(0.01), 500.25);
+  ```
+</ResponseField>
+
+<ResponseField name="is_zero" type="bool">
+  Check if the price is zero
+</ResponseField>
+
+<ResponseField name="is_positive" type="bool">
+  Check if the price is positive
+</ResponseField>
+
+<ResponseField name="is_negative" type="bool">
+  Check if the price is negative
+</ResponseField>
+
+<ResponseField name="abs" type="Price">
+  Get the absolute value
+</ResponseField>
+
+### Arithmetic Operations
+
+```rust
+let p1 = Price::from_raw(100);
+let p2 = Price::from_raw(50);
+
+// Addition
+assert_eq!((p1 + p2).raw(), 150);
+
+// Subtraction
+assert_eq!((p1 - p2).raw(), 50);
+
+// Multiplication by scalar
+assert_eq!((p1 * 2).raw(), 200);
+
+// Division by scalar
+assert_eq!((p1 / 2).raw(), 50);
+
+// Saturating operations (prevent overflow)
+let max = Price::MAX;
+assert_eq!(max.saturating_add(p1), Price::MAX);
+
+// Checked operations (return Option)
+if let Some(result) = p1.checked_add(p2) {
+    println!("Sum: {}", result.raw());
+}
+```
+
+---
+
+## Quantity
+
+Represents order and position sizes using unsigned integers.
+
+### Definition
+
+```rust
+pub struct Quantity(u32);
+```
+
+<ParamField path="Quantity::ZERO" type="Quantity">
+  Zero quantity constant
+</ParamField>
+
+<ParamField path="Quantity::MAX" type="Quantity">
+  Maximum quantity constant (u32::MAX)
+</ParamField>
+
+### Constructors
+
+<ParamField path="new" type="fn(value: u32) -> Quantity">
+  Create a new quantity
+  
+  ```rust
+  let qty = Quantity::new(100);
+  assert_eq!(qty.value(), 100);
+  ```
+</ParamField>
+
+### Methods
+
+<ResponseField name="value" type="u32">
+  Get the raw value
+</ResponseField>
+
+<ResponseField name="is_zero" type="bool">
+  Check if quantity is zero
+</ResponseField>
+
+<ResponseField name="as_i64" type="i64">
+  Convert to i64 for position calculations
+</ResponseField>
+
+<ResponseField name="as_f64" type="f64">
+  Convert to f64 for calculations
+</ResponseField>
+
+### Example Usage
+
+```rust
+let q1 = Quantity::new(100);
+let q2 = Quantity::new(50);
+
+// Arithmetic
+assert_eq!((q1 + q2).value(), 150);
+assert_eq!((q1 - q2).value(), 50);
+assert_eq!((q1 * 2).value(), 200);
+
+// Saturating operations
+let result = q1.saturating_add(q2);
+```
+
+---
+
+## SignedQuantity
+
+Signed quantity for positions (positive = long, negative = short).
+
+### Definition
+
+```rust
+pub struct SignedQuantity(i64);
+```
+
+### Methods
+
+<ResponseField name="new" type="fn(value: i64) -> SignedQuantity">
+  Create a new signed quantity
+</ResponseField>
+
+<ResponseField name="value" type="i64">
+  Get the raw value
+</ResponseField>
+
+<ResponseField name="abs" type="Quantity">
+  Get the absolute value as unsigned quantity
+</ResponseField>
+
+<ResponseField name="is_long" type="bool">
+  Check if the position is long (positive)
+</ResponseField>
+
+<ResponseField name="is_short" type="bool">
+  Check if the position is short (negative)
+</ResponseField>
+
+<ResponseField name="is_flat" type="bool">
+  Check if the position is flat (zero)
+</ResponseField>
+
+### Example Usage
+
+```rust
+let long = SignedQuantity::new(100);
+let short = SignedQuantity::new(-50);
+
+assert!(long.is_long());
+assert!(short.is_short());
+assert_eq!((long + short).value(), 50);
+assert_eq!(short.abs().value(), 50);
+```
+
+---
+
+## Side
+
+Order/Trade side enumeration.
+
+### Definition
+
+```rust
+#[repr(u8)]
+pub enum Side {
+    Buy = 0,
+    Sell = 1,
+}
+```
+
+### Methods
+
+<ResponseField name="is_buy" type="bool">
+  Check if this is a buy side
+</ResponseField>
+
+<ResponseField name="is_sell" type="bool">
+  Check if this is a sell side
+</ResponseField>
+
+<ResponseField name="opposite" type="Side">
+  Get the opposite side
+  
+  ```rust
+  assert_eq!(Side::Buy.opposite(), Side::Sell);
+  ```
+</ResponseField>
+
+<ResponseField name="sign" type="i64">
+  Convert to a sign multiplier (1 for buy, -1 for sell)
+  
+  ```rust
+  assert_eq!(Side::Buy.sign(), 1);
+  assert_eq!(Side::Sell.sign(), -1);
+  ```
+</ResponseField>
+
+<ResponseField name="sign_f64" type="f64">
+  Convert to a sign multiplier as f64
+</ResponseField>
+
+### Conversions
+
+```rust
+// From boolean
+let side = Side::from_is_buy(true);
+assert_eq!(side, Side::Buy);
+
+// From u8
+let side = Side::from_u8(0);
+assert_eq!(side, Some(Side::Buy));
+
+// To u8
+let value: u8 = Side::Buy.as_u8();
+assert_eq!(value, 0);
+
+// Using Not operator
+assert_eq!(!Side::Buy, Side::Sell);
+```
+
+---
+
+## Timestamp
+
+Nanosecond-precision timestamp since Unix epoch.
+
+### Definition
+
+```rust
+pub struct Timestamp(i64);
+```
+
+Optimized for HFT applications where every nanosecond matters.
+
+<ParamField path="Timestamp::EPOCH" type="Timestamp">
+  Zero timestamp (Unix epoch)
+</ParamField>
+
+<ParamField path="Timestamp::MAX" type="Timestamp">
+  Maximum timestamp
+</ParamField>
+
+<ParamField path="Timestamp::MIN" type="Timestamp">
+  Minimum timestamp
+</ParamField>
+
+### Constructors
+
+<ParamField path="from_nanos" type="fn(nanos: i64) -> Timestamp">
+  Create a timestamp from nanoseconds since epoch
+</ParamField>
+
+<ParamField path="from_micros" type="fn(micros: i64) -> Timestamp">
+  Create a timestamp from microseconds since epoch
+</ParamField>
+
+<ParamField path="from_millis" type="fn(millis: i64) -> Timestamp">
+  Create a timestamp from milliseconds since epoch
+</ParamField>
+
+<ParamField path="from_secs" type="fn(secs: i64) -> Timestamp">
+  Create a timestamp from seconds since epoch
+</ParamField>
+
+<ParamField path="now" type="fn() -> Timestamp">
+  Get the current timestamp
+  
+  ```rust
+  let ts = Timestamp::now();
+  ```
+</ParamField>
+
+### Methods
+
+<ResponseField name="as_nanos" type="i64">
+  Get nanoseconds since epoch
+</ResponseField>
+
+<ResponseField name="as_micros" type="i64">
+  Get microseconds since epoch
+</ResponseField>
+
+<ResponseField name="as_millis" type="i64">
+  Get milliseconds since epoch
+</ResponseField>
+
+<ResponseField name="as_secs" type="i64">
+  Get seconds since epoch
+</ResponseField>
+
+<ResponseField name="subsec_nanos" type="u32">
+  Get the nanosecond component (0-999,999,999)
+</ResponseField>
+
+<ResponseField name="duration_since" type="i64">
+  Calculate duration to another timestamp in nanoseconds
+  
+  ```rust
+  let t1 = Timestamp::from_nanos(1000);
+  let t2 = Timestamp::from_nanos(500);
+  assert_eq!(t1.duration_since(t2), 500);
+  ```
+</ResponseField>
+
+### Example Usage
+
+```rust
+let ts = Timestamp::now();
+let later = ts.add_nanos(1000);
+assert!(later > ts);
+
+// Time arithmetic
+let t1 = Timestamp::from_nanos(1000);
+let t2 = t1.add_micros(1);  // Add 1 microsecond
+let t3 = t1.add_millis(1);  // Add 1 millisecond
+
+// Duration calculation
+let duration = t2.duration_since(t1);
+println!("Duration: {} ns", duration);
+
+// Convert to chrono DateTime
+let dt = ts.to_datetime();
+println!("DateTime: {}", dt);
+```
+
+---
+
+## OrderId
+
+Unique order identifier.
+
+### Definition
+
+```rust
+pub struct OrderId(u64);
+```
+
+### Methods
+
+<ResponseField name="new" type="fn(id: u64) -> OrderId">
+  Create a new order ID
+  
+  ```rust
+  let id = OrderId::new(12345);
+  ```
+</ResponseField>
+
+<ResponseField name="value" type="u64">
+  Get the raw value
+  
+  ```rust
+  let id = OrderId::new(12345);
+  assert_eq!(id.value(), 12345);
+  ```
+</ResponseField>
+
+### Conversions
+
+```rust
+// From u64
+let id: OrderId = 12345u64.into();
+
+// To u64
+let value: u64 = id.into();
+```
+
+---
+
+## Order
+
+A trading order with full lifecycle tracking.
+
+### Definition
+
+```rust
+pub struct Order {
+    pub id: OrderId,
+    pub instrument_id: u32,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub time_in_force: TimeInForce,
+    pub status: OrderStatus,
+    pub price: Price,
+    pub stop_price: Price,
+    pub quantity: Quantity,
+    pub filled_quantity: Quantity,
+    pub avg_fill_price: i64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+```
+
+### Order Types
+
+```rust
+pub enum OrderType {
+    Limit,      // Specify price and quantity
+    Market,     // Execute at best available price
+    Stop,       // Trigger at stop price, then execute as market
+    StopLimit,  // Trigger at stop price, then place limit order
+}
+```
+
+### Time In Force
+
+```rust
+pub enum TimeInForce {
+    GTC,  // Good till cancelled
+    IOC,  // Immediate or cancel (partial fills allowed)
+    FOK,  // Fill or kill (no partial fills)
+    Day,  // Expires at end of trading session
+    GTD,  // Good till date
+}
+```
+
+### Order Status
+
+```rust
+pub enum OrderStatus {
+    Pending,          // Order is pending submission
+    Submitted,        // Order has been submitted to exchange
+    Open,             // Order is open in the order book
+    PartiallyFilled,  // Order is partially filled
+    Filled,           // Order is completely filled
+    Cancelled,        // Order has been cancelled
+    Rejected,         // Order was rejected
+    Expired,          // Order has expired
+}
+```
+
+### Constructors
+
+<ParamField path="new_limit" type="fn(id: OrderId, instrument_id: u32, side: Side, price: Price, quantity: Quantity, time_in_force: TimeInForce) -> Order">
+  Create a new limit order
+  
+  ```rust
+  let order = Order::new_limit(
+      OrderId::new(1),
+      100,  // instrument_id
+      Side::Buy,
+      Price::from_raw(50000),
+      Quantity::new(10),
+      TimeInForce::GTC,
+  );
+  ```
+</ParamField>
+
+<ParamField path="new_market" type="fn(id: OrderId, instrument_id: u32, side: Side, quantity: Quantity) -> Order">
+  Create a new market order
+  
+  ```rust
+  let order = Order::new_market(
+      OrderId::new(2),
+      100,
+      Side::Sell,
+      Quantity::new(5),
+  );
+  ```
+</ParamField>
+
+### Methods
+
+<ResponseField name="remaining_quantity" type="Quantity">
+  Get remaining quantity to be filled
+  
+  ```rust
+  let remaining = order.remaining_quantity();
+  ```
+</ResponseField>
+
+<ResponseField name="is_filled" type="bool">
+  Check if the order is completely filled
+</ResponseField>
+
+<ResponseField name="is_cancellable" type="bool">
+  Check if the order can be cancelled
+</ResponseField>
+
+<ResponseField name="fill_ratio" type="f64">
+  Get fill ratio (0.0 to 1.0)
+  
+  ```rust
+  let ratio = order.fill_ratio();
+  println!("Order is {}% filled", ratio * 100.0);
+  ```
+</ResponseField>
+
+<ResponseField name="apply_fill" type="fn(&mut self, fill_price: Price, fill_qty: Quantity, timestamp: Timestamp)">
+  Update order with a fill
+  
+  ```rust
+  order.apply_fill(
+      Price::from_raw(49990),
+      Quantity::new(5),
+      Timestamp::now(),
+  );
+  ```
+</ResponseField>
+
+---
+
+## Quote
+
+Best Bid/Offer (BBO) representation.
+
+### Definition
+
+```rust
+pub struct Quote {
+    pub instrument_id: u32,
+    pub bid_price: Price,
+    pub bid_quantity: Quantity,
+    pub ask_price: Price,
+    pub ask_quantity: Quantity,
+    pub timestamp: Timestamp,
+}
+```
+
+### Methods
+
+<ResponseField name="new" type="fn(instrument_id: u32, bid_price: Price, bid_quantity: Quantity, ask_price: Price, ask_quantity: Quantity, timestamp: Timestamp) -> Quote">
+  Create a new quote
+</ResponseField>
+
+<ResponseField name="mid_price" type="Price">
+  Calculate the mid price
+  
+  ```rust
+  let mid = quote.mid_price();
+  ```
+</ResponseField>
+
+<ResponseField name="spread" type="Price">
+  Calculate the spread in ticks
+  
+  ```rust
+  let spread = quote.spread();
+  ```
+</ResponseField>
+
+<ResponseField name="is_valid" type="bool">
+  Check if the quote is valid (bid < ask)
+</ResponseField>
+
+---
+
+## Trade
+
+Trade execution information.
+
+### Definition
+
+```rust
+pub struct Trade {
+    pub id: u64,
+    pub instrument_id: u32,
+    pub price: Price,
+    pub quantity: Quantity,
+    pub aggressor_side: Side,
+    pub timestamp: Timestamp,
+}
+```
+
+---
+
+## Fill
+
+Fill information for an executed order.
+
+### Definition
+
+```rust
+pub struct Fill {
+    pub order_id: OrderId,
+    pub price: Price,
+    pub quantity: Quantity,
+    pub side: Side,
+    pub is_maker: bool,
+    pub timestamp: Timestamp,
+    pub fee: f64,
+}
+```
+
+### Methods
+
+<ResponseField name="notional" type="f64">
+  Calculate the notional value of this fill
+  
+  ```rust
+  let value = fill.notional();
+  ```
+</ResponseField>
+
+<ResponseField name="signed_quantity" type="i64">
+  Calculate the signed quantity (positive for buy, negative for sell)
+  
+  ```rust
+  let signed_qty = fill.signed_quantity();
+  ```
+</ResponseField>
+
+---
+
+## Level
+
+A price level in the order book.
+
+### Definition
+
+```rust
+pub struct Level {
+    pub price: Price,
+    pub quantity: Quantity,
+    pub order_count: u32,
+}
+```
+
+### Methods
+
+<ResponseField name="new" type="fn(price: Price, quantity: Quantity, order_count: u32) -> Level">
+  Create a new level
+</ResponseField>
+
+<ResponseField name="empty" type="fn(price: Price) -> Level">
+  Create an empty level at a given price
+</ResponseField>
+
+<ResponseField name="is_empty" type="bool">
+  Check if the level is empty
+</ResponseField>

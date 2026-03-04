@@ -1,0 +1,659 @@
+---
+title: 'Signal Strategy'
+description: 'Signal-based trading with confidence thresholds and position sizing'
+---
+
+## Overview
+
+The signal-based strategy module provides components for trading based on prediction signals from machine learning models or other signal generators. It includes:
+
+- Signal types with direction, strength, and confidence
+- Configurable confidence thresholds
+- Position sizing based on signal strength
+- Risk management with position limits
+
+## Signal
+
+Represents a trading signal with direction, strength, and confidence.
+
+```rust
+pub struct Signal {
+    pub direction: i8,        // -1 (sell), 0 (neutral), +1 (buy)
+    pub strength: f32,        // Signal strength (0 to 1)
+    pub confidence: f32,      // Confidence from model (0 to 1)
+    pub timestamp: Timestamp, // Signal timestamp
+}
+```
+
+### Signal Fields
+
+#### direction
+
+The trading direction suggested by the signal:
+- `+1`: Buy signal (expect price to increase)
+- `-1`: Sell signal (expect price to decrease)
+- `0`: Neutral signal (no clear direction)
+
+#### strength
+
+Magnitude of the signal, ranging from 0.0 to 1.0. Higher values indicate stronger signals.
+
+**Usage:**
+- Can be used for position sizing
+- Filters out weak signals
+- Typically derived from model prediction magnitude
+
+#### confidence
+
+Model confidence in the prediction, ranging from 0.0 to 1.0. Higher values indicate more reliable signals.
+
+**Usage:**
+- Primary filter for signal quality
+- Compared against `min_confidence` threshold
+- Can represent model uncertainty or ensemble agreement
+
+#### timestamp
+
+When the signal was generated, used for tracking signal freshness.
+
+### Signal Constructors
+
+#### buy
+
+```rust
+pub fn buy(strength: f32, confidence: f32, timestamp: Timestamp) -> Self
+```
+
+Creates a buy signal.
+
+**Example:**
+```rust
+use nano_strategy::signals::Signal;
+use nano_core::types::Timestamp;
+
+let signal = Signal::buy(
+    0.75,  // 75% strength
+    0.82,  // 82% confidence
+    Timestamp::now(),
+);
+
+assert!(signal.is_buy());
+assert_eq!(signal.direction, 1);
+```
+
+#### sell
+
+```rust
+pub fn sell(strength: f32, confidence: f32, timestamp: Timestamp) -> Self
+```
+
+Creates a sell signal.
+
+**Example:**
+```rust
+let signal = Signal::sell(
+    0.68,  // 68% strength
+    0.79,  // 79% confidence
+    Timestamp::now(),
+);
+
+assert!(signal.is_sell());
+assert_eq!(signal.direction, -1);
+```
+
+#### neutral
+
+```rust
+pub fn neutral(timestamp: Timestamp) -> Self
+```
+
+Creates a neutral signal indicating no trading action.
+
+**Example:**
+```rust
+let signal = Signal::neutral(Timestamp::now());
+assert!(signal.is_neutral());
+assert_eq!(signal.direction, 0);
+```
+
+### Signal Methods
+
+#### is_buy
+
+```rust
+pub fn is_buy(&self) -> bool
+```
+
+Returns `true` if the signal direction is positive (buy).
+
+#### is_sell
+
+```rust
+pub fn is_sell(&self) -> bool
+```
+
+Returns `true` if the signal direction is negative (sell).
+
+#### is_neutral
+
+```rust
+pub fn is_neutral(&self) -> bool
+```
+
+Returns `true` if the signal direction is zero (neutral).
+
+#### side
+
+```rust
+pub fn side(&self) -> Option<Side>
+```
+
+Converts signal direction to an order side.
+
+**Returns:**
+- `Some(Side::Buy)` for buy signals
+- `Some(Side::Sell)` for sell signals
+- `None` for neutral signals
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/signals.rs:104-111
+
+## SignalConfig
+
+Configuration for signal-based trading strategies.
+
+```rust
+pub struct SignalConfig {
+    pub min_confidence: f32,      // Minimum confidence threshold
+    pub min_magnitude: f32,       // Minimum prediction magnitude
+    pub confidence_scaling: bool, // Position sizing based on confidence
+    pub max_position_size: f32,   // Maximum position size (as fraction)
+    pub target_ticks: i64,        // Target profit in ticks
+    pub stop_ticks: i64,          // Stop loss in ticks
+}
+```
+
+### Configuration Parameters
+
+#### min_confidence
+
+Minimum confidence threshold for acting on signals. Signals below this threshold are ignored.
+
+**Default:** `0.55` (55%)
+
+**Example:**
+```rust
+let config = SignalConfig {
+    min_confidence: 0.65, // Only trade signals with 65%+ confidence
+    ..Default::default()
+};
+```
+
+#### min_magnitude
+
+Minimum prediction magnitude required. Can filter out weak predictions.
+
+**Default:** `0.001`
+
+**Note:** Currently not actively used in the base implementation but available for custom strategies.
+
+#### confidence_scaling
+
+Whether to scale position size based on signal strength.
+
+**Default:** `true`
+
+**Behavior:**
+- `true`: Order size = `base_size * signal.strength`
+- `false`: Order size = `base_size` (constant)
+
+**Example:**
+```rust
+// With confidence_scaling = true, base_size = 10:
+// Signal strength 0.5 → Order size = 5
+// Signal strength 1.0 → Order size = 10
+```
+
+#### max_position_size
+
+Maximum position size as a fraction. Currently defined but not actively enforced in base implementation.
+
+**Default:** `1.0`
+
+#### target_ticks
+
+Target profit level in ticks for take-profit orders.
+
+**Default:** `10`
+
+**Note:** Available for use in custom strategies or profit-taking logic.
+
+#### stop_ticks
+
+Stop loss level in ticks for risk management.
+
+**Default:** `5`
+
+**Note:** Available for use in custom strategies or stop-loss logic.
+
+### Default Configuration
+
+```rust
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence: 0.55,
+            min_magnitude: 0.001,
+            confidence_scaling: true,
+            max_position_size: 1.0,
+            target_ticks: 10,
+            stop_ticks: 5,
+        }
+    }
+}
+```
+
+## SignalStrategy
+
+A strategy that trades based on external signals.
+
+```rust
+pub struct SignalStrategy {
+    base: BaseStrategy,
+    config: SignalConfig,
+    instrument_id: u32,
+    order_size: u32,
+    max_position: i64,
+    pending_order: Option<OrderId>,
+    last_signal: Option<Signal>,
+    next_order_id: u64,
+}
+```
+
+### Constructor
+
+#### new
+
+```rust
+pub fn new(
+    name: &str,
+    instrument_id: u32,
+    signal_config: SignalConfig,
+    order_size: u32,
+    max_position: i64,
+    tick_value: f64,
+) -> Self
+```
+
+Creates a new signal-based strategy.
+
+**Parameters:**
+- `name`: Strategy identifier
+- `instrument_id`: ID of the instrument to trade
+- `signal_config`: Signal configuration
+- `order_size`: Base order size in contracts
+- `max_position`: Maximum absolute position allowed
+- `tick_value`: Value of one tick for P&L calculation
+
+**Example:**
+```rust
+use nano_strategy::signals::{SignalStrategy, SignalConfig};
+
+let config = SignalConfig {
+    min_confidence: 0.60,
+    confidence_scaling: true,
+    target_ticks: 15,
+    stop_ticks: 7,
+    ..Default::default()
+};
+
+let mut strategy = SignalStrategy::new(
+    "ML_Signal",
+    101,      // instrument_id
+    config,
+    20,       // base order size
+    100,      // max position
+    12.5,     // tick value
+);
+```
+
+### Core Methods
+
+#### process_signal
+
+```rust
+pub fn process_signal(
+    &mut self,
+    signal: &Signal,
+    book: &dyn OrderBook,
+) -> Vec<Order>
+```
+
+Processes a trading signal and generates orders if appropriate.
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/signals.rs:158-215
+
+**Logic:**
+1. Skip if pending order exists
+2. Check signal confidence against threshold
+3. Determine order side from signal direction
+4. Calculate order size (respecting position limits)
+5. Generate IOC (Immediate-Or-Cancel) order
+6. Record as pending order
+
+**Example:**
+```rust
+use nano_strategy::signals::{SignalStrategy, SignalConfig, Signal};
+use nano_core::types::Timestamp;
+
+let config = SignalConfig::default();
+let mut strategy = SignalStrategy::new(
+    "test",
+    1,
+    config,
+    10,
+    100,
+    12.5,
+);
+
+// Process a buy signal
+let signal = Signal::buy(0.8, 0.75, Timestamp::now());
+let orders = strategy.process_signal(&signal, &order_book);
+
+for order in orders {
+    exchange.submit_order(order);
+}
+```
+
+#### calculate_order_size
+
+```rust
+fn calculate_order_size(&self, signal: &Signal, current_pos: i64) -> u32
+```
+
+Calculates appropriate order size based on signal strength and position limits.
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/signals.rs:218-234
+
+**Algorithm:**
+1. Apply confidence scaling if enabled:
+   ```rust
+   size = base_size * signal.strength
+   ```
+2. Calculate remaining capacity:
+   - For buy: `max_position - current_position`
+   - For sell: `max_position + current_position`
+3. Return minimum of calculated size and remaining capacity
+
+**Example:**
+```rust
+// Config: order_size = 20, confidence_scaling = true
+// Position: +30, Max: 100
+// Signal: buy, strength = 0.6
+
+// Calculated size = 20 * 0.6 = 12
+// Max buy capacity = 100 - 30 = 70
+// Final order size = min(12, 70) = 12
+```
+
+#### last_signal
+
+```rust
+pub fn last_signal(&self) -> Option<&Signal>
+```
+
+Returns a reference to the most recently processed signal.
+
+**Example:**
+```rust
+if let Some(signal) = strategy.last_signal() {
+    println!("Last signal: direction={}, confidence={:.2}",
+             signal.direction, signal.confidence);
+}
+```
+
+## Strategy Implementation
+
+The `SignalStrategy` implements the `Strategy` trait:
+
+### on_market_data
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/signals.rs:248-251
+
+Updates base strategy but doesn't generate orders. Signals must be provided externally via `process_signal()`.
+
+### on_fill
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/signals.rs:253-259
+
+Handles fill events:
+1. Updates position and P&L via base strategy
+2. Clears pending order if the fill matches
+
+### on_order_reject / on_order_cancel
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/signals.rs:263-273
+
+Clears pending order tracking when orders are rejected or cancelled.
+
+## Usage Patterns
+
+### Integration with ML Models
+
+```rust
+use nano_strategy::signals::{SignalStrategy, SignalConfig, Signal};
+use nano_core::types::Timestamp;
+
+// Initialize strategy
+let config = SignalConfig {
+    min_confidence: 0.70,  // High confidence threshold
+    confidence_scaling: true,
+    ..Default::default()
+};
+
+let mut strategy = SignalStrategy::new(
+    "LSTM_ES",
+    101,
+    config,
+    15,
+    200,
+    12.5,
+);
+
+// In your main trading loop:
+loop {
+    // Get prediction from ML model
+    let prediction = ml_model.predict(&features);
+    
+    // Convert to signal
+    let signal = if prediction.value > 0.0 {
+        Signal::buy(
+            prediction.value.abs() as f32,
+            prediction.confidence as f32,
+            Timestamp::now(),
+        )
+    } else if prediction.value < 0.0 {
+        Signal::sell(
+            prediction.value.abs() as f32,
+            prediction.confidence as f32,
+            Timestamp::now(),
+        )
+    } else {
+        Signal::neutral(Timestamp::now())
+    };
+    
+    // Process signal
+    let orders = strategy.process_signal(&signal, &order_book);
+    
+    // Submit orders to exchange
+    for order in orders {
+        exchange.submit_order(order);
+    }
+    
+    // Monitor performance
+    println!("Position: {}, P&L: ${:.2}",
+             strategy.position(), strategy.pnl());
+}
+```
+
+### Multiple Signal Sources
+
+```rust
+// Ensemble of signal strategies
+let mut strategies = vec![
+    SignalStrategy::new("Model_A", 101, config.clone(), 10, 50, 12.5),
+    SignalStrategy::new("Model_B", 101, config.clone(), 10, 50, 12.5),
+    SignalStrategy::new("Model_C", 101, config.clone(), 10, 50, 12.5),
+];
+
+// Generate signals from each model
+let signals = vec![
+    model_a.predict(&features),
+    model_b.predict(&features),
+    model_c.predict(&features),
+];
+
+// Process each signal independently
+for (strategy, signal) in strategies.iter_mut().zip(signals.iter()) {
+    let orders = strategy.process_signal(signal, &order_book);
+    // Submit orders...
+}
+
+// Aggregate P&L across strategies
+let total_pnl: f64 = strategies.iter().map(|s| s.pnl()).sum();
+```
+
+### Risk Management
+
+```rust
+let config = SignalConfig {
+    min_confidence: 0.65,     // Require strong signals
+    confidence_scaling: true, // Scale size with confidence
+    target_ticks: 20,         // Take profit at 20 ticks
+    stop_ticks: 10,           // Stop loss at 10 ticks
+    ..Default::default()
+};
+
+let mut strategy = SignalStrategy::new(
+    "Risk_Managed",
+    101,
+    config,
+    10,      // Conservative size
+    50,      // Tight position limit
+    12.5,
+);
+
+// Monitor risk in trading loop
+if strategy.position().abs() > 40 {
+    println!("WARNING: Approaching position limit");
+}
+
+if strategy.pnl() < -500.0 {
+    println!("WARNING: Drawdown threshold reached");
+    // Implement emergency stop logic
+}
+```
+
+## Signal Interpretation
+
+### Confidence vs Strength
+
+**Confidence:**
+- How certain is the model about its prediction?
+- Used as a gate: signals below `min_confidence` are rejected
+- Represents model reliability or uncertainty
+
+**Strength:**
+- How strong is the predicted move?
+- Used for position sizing when `confidence_scaling = true`
+- Represents magnitude of expected price movement
+
+**Example:**
+```rust
+// High confidence, moderate strength
+let signal = Signal::buy(
+    0.60,  // Moderate expected move
+    0.85,  // Very confident
+    Timestamp::now(),
+);
+// Result: Trade will be taken, moderate position size
+
+// Moderate confidence, high strength
+let signal = Signal::buy(
+    0.95,  // Strong expected move
+    0.58,  // Low confidence
+    Timestamp::now(),
+);
+// Result: May not trade if min_confidence > 0.58
+```
+
+### Direction Values
+
+| Direction | Meaning | Use Case |
+|-----------|---------|----------|
+| +1 | Buy | Expect price increase |
+| 0 | Neutral | Uncertain or no clear signal |
+| -1 | Sell | Expect price decrease |
+
+## Complete Example
+
+```rust
+use nano_strategy::signals::{SignalStrategy, SignalConfig, Signal};
+use nano_strategy::StrategyState;
+use nano_core::traits::Strategy;
+use nano_core::types::Timestamp;
+
+fn main() {
+    // Configure signal-based strategy
+    let config = SignalConfig {
+        min_confidence: 0.60,
+        min_magnitude: 0.01,
+        confidence_scaling: true,
+        max_position_size: 1.0,
+        target_ticks: 15,
+        stop_ticks: 8,
+    };
+    
+    let mut strategy = SignalStrategy::new(
+        "ES_Predictor",
+        101,         // ES futures
+        config,
+        20,          // 20 contracts base size
+        100,         // Max 100 contracts
+        12.5,        // $12.50 per tick
+    );
+    
+    // Activate strategy
+    strategy.base.set_state(StrategyState::Trading);
+    
+    // Simulate receiving signals
+    let signals = vec![
+        Signal::buy(0.75, 0.82, Timestamp::now()),
+        Signal::neutral(Timestamp::now()),
+        Signal::sell(0.65, 0.73, Timestamp::now()),
+    ];
+    
+    for signal in signals {
+        println!("Processing signal: dir={}, str={:.2}, conf={:.2}",
+                 signal.direction, signal.strength, signal.confidence);
+        
+        let orders = strategy.process_signal(&signal, &order_book);
+        
+        if !orders.is_empty() {
+            println!("Generated {} orders", orders.len());
+            // Submit to exchange...
+        } else {
+            println!("No orders generated");
+        }
+    }
+    
+    // Check performance
+    println!("Final position: {}", strategy.position());
+    println!("Total P&L: ${:.2}", strategy.pnl());
+}
+```
+
+## See Also
+
+- [BaseStrategy](/api/strategy/base) - Base strategy implementation
+- [MarketMakerStrategy](/api/strategy/market-maker) - Market-making strategy
+- [Strategy Trait](/api/core/traits) - Core strategy interface

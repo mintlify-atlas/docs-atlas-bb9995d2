@@ -1,0 +1,338 @@
+---
+title: 'BaseStrategy'
+description: 'Core strategy implementation with position tracking and P&L calculation'
+---
+
+## Overview
+
+The `BaseStrategy` provides foundational strategy functionality including position tracking, P&L calculation, state management, and fill processing. All trading strategies in NanoARB can build upon this base implementation.
+
+## StrategyState
+
+Strategies progress through various states during their lifecycle:
+
+```rust
+pub enum StrategyState {
+    Initializing,  // Strategy is initializing
+    Ready,         // Strategy is ready to trade
+    Trading,       // Strategy is actively trading
+    Paused,        // Strategy is paused
+    Stopped,       // Strategy is stopped
+    Error,         // Strategy encountered an error
+}
+```
+
+### State Transitions
+
+- **Initializing** → **Ready**: Strategy completes initialization
+- **Ready** → **Trading**: Strategy begins active trading
+- **Trading** → **Paused**: Temporarily halt trading
+- **Paused** → **Trading**: Resume trading
+- **Any** → **Stopped**: Permanently stop the strategy
+- **Any** → **Error**: Error condition detected
+
+## BaseStrategy Structure
+
+```rust
+pub struct BaseStrategy {
+    name: String,              // Strategy name
+    state: StrategyState,      // Current state
+    position: i64,             // Current position (signed)
+    realized_pnl: f64,         // Realized profit/loss
+    unrealized_pnl: f64,       // Unrealized profit/loss
+    total_fees: f64,           // Total fees paid
+    avg_entry_price: i64,      // Average entry price
+    fill_count: u32,           // Number of fills
+    round_trips: u32,          // Number of round trips
+    last_mid: Option<Price>,   // Last mid price
+    tick_value: f64,           // Tick value for P&L calculation
+}
+```
+
+## Constructor
+
+### new
+
+```rust
+pub fn new(name: &str, tick_value: f64) -> Self
+```
+
+Creates a new base strategy with the specified name and tick value.
+
+**Parameters:**
+- `name`: Strategy identifier
+- `tick_value`: Value of one tick for P&L calculation
+
+**Example:**
+```rust
+use nano_strategy::BaseStrategy;
+
+let strategy = BaseStrategy::new("my_strategy", 12.5);
+```
+
+## State Management
+
+### state
+
+```rust
+pub fn state(&self) -> StrategyState
+```
+
+Returns the current strategy state.
+
+### set_state
+
+```rust
+pub fn set_state(&mut self, state: StrategyState)
+```
+
+Updates the strategy state.
+
+**Example:**
+```rust
+use nano_strategy::{BaseStrategy, StrategyState};
+
+let mut strategy = BaseStrategy::new("test", 12.5);
+strategy.set_state(StrategyState::Ready);
+assert_eq!(strategy.state(), StrategyState::Ready);
+```
+
+### is_ready
+
+```rust
+pub fn is_ready(&self) -> bool
+```
+
+Returns `true` if the strategy is in `Ready` or `Trading` state.
+
+## Position Management
+
+### update_position
+
+```rust
+pub fn update_position(&mut self, fill: &Fill)
+```
+
+Updates the position based on a fill event. This method:
+- Tracks position changes
+- Updates average entry price
+- Calculates realized P&L when reducing positions
+- Counts round trips (flat → position → flat)
+- Accumulates fees
+
+**Fill Processing Logic:**
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/base.rs:81-132
+
+1. **Adding to Position**: When the fill increases position size
+   - Recalculates weighted average entry price
+   - Updates position size
+
+2. **Reducing Position**: When the fill decreases position size
+   - Realizes P&L on the reduced portion
+   - Checks for round trip completion
+   - Updates or resets average entry price
+
+**Example:**
+```rust
+use nano_core::types::{Fill, Side, Price, Quantity, OrderId, Timestamp};
+use nano_strategy::BaseStrategy;
+
+let mut strategy = BaseStrategy::new("test", 12.5);
+
+// Buy 10 contracts @ 50000
+let buy_fill = Fill {
+    order_id: OrderId::new(1),
+    price: Price::from_raw(50000),
+    quantity: Quantity::new(10),
+    side: Side::Buy,
+    is_maker: true,
+    timestamp: Timestamp::now(),
+    fee: 2.5,
+};
+strategy.update_position(&buy_fill);
+
+assert_eq!(strategy.position(), 10);
+
+// Sell 10 contracts @ 50010 (profit of 10 ticks per contract)
+let sell_fill = Fill {
+    order_id: OrderId::new(2),
+    price: Price::from_raw(50010),
+    quantity: Quantity::new(10),
+    side: Side::Sell,
+    is_maker: true,
+    timestamp: Timestamp::now(),
+    fee: 2.5,
+};
+strategy.update_position(&sell_fill);
+
+assert_eq!(strategy.position(), 0);
+assert_eq!(strategy.round_trips(), 1);
+assert!(strategy.total_pnl() > 0.0);
+```
+
+### position_size
+
+```rust
+pub fn position_size(&self) -> u64
+```
+
+Returns the absolute position size.
+
+### is_flat
+
+```rust
+pub fn is_flat(&self) -> bool
+```
+
+Returns `true` if the current position is zero.
+
+## P&L Tracking
+
+### update_unrealized
+
+```rust
+pub fn update_unrealized(&mut self, current_price: Price)
+```
+
+Updates unrealized P&L based on the current market price.
+
+**Calculation:**
+```rust
+price_diff = current_price - avg_entry_price
+pnl_ticks = price_diff * position
+unrealized_pnl = pnl_ticks * tick_value / 100.0
+```
+
+### total_pnl
+
+```rust
+pub fn total_pnl(&self) -> f64
+```
+
+Returns total P&L (realized + unrealized - fees).
+
+### net_pnl
+
+```rust
+pub fn net_pnl(&self) -> f64
+```
+
+Returns net P&L after fees. Currently identical to `total_pnl()`.
+
+**Example:**
+```rust
+use nano_core::types::Price;
+use nano_strategy::BaseStrategy;
+
+let mut strategy = BaseStrategy::new("test", 12.5);
+// ... after some fills ...
+
+// Update unrealized P&L with current market price
+strategy.update_unrealized(Price::from_raw(50020));
+
+let total = strategy.total_pnl();
+println!("Total P&L: ${:.2}", total);
+```
+
+## Statistics
+
+### fill_count
+
+```rust
+pub fn fill_count(&self) -> u32
+```
+
+Returns the total number of fills processed.
+
+### round_trips
+
+```rust
+pub fn round_trips(&self) -> u32
+```
+
+Returns the number of completed round trips. A round trip occurs when:
+- Position goes from flat to long/short and back to flat
+- Position changes from long to short or vice versa
+
+## Strategy Trait Implementation
+
+The `BaseStrategy` implements the core `Strategy` trait:
+
+```rust
+impl Strategy for BaseStrategy {
+    fn name(&self) -> &str;
+    fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order>;
+    fn on_fill(&mut self, fill: &Fill);
+    fn on_order_ack(&mut self, order_id: OrderId);
+    fn on_order_reject(&mut self, order_id: OrderId, reason: &str);
+    fn on_order_cancel(&mut self, order_id: OrderId);
+    fn position(&self) -> i64;
+    fn pnl(&self) -> f64;
+    fn is_ready(&self) -> bool;
+    fn reset(&mut self);
+}
+```
+
+### on_market_data
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/base.rs:201-210
+
+Updates the last mid price and unrealized P&L. The base implementation returns an empty vector (no orders).
+
+### on_fill
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/base.rs:212-214
+
+Delegates to `update_position()` to handle fill processing.
+
+### reset
+
+```rust
+pub fn reset(&mut self)
+```
+
+Resets all strategy state to initial values:
+- State → Initializing
+- Position → 0
+- P&L → 0.0
+- Fills/round trips → 0
+- Clears last mid price
+
+## Complete Example
+
+```rust
+use nano_strategy::{BaseStrategy, StrategyState};
+use nano_core::types::{Fill, Side, Price, Quantity, OrderId, Timestamp};
+
+fn main() {
+    // Create strategy for ES futures (tick value $12.50)
+    let mut strategy = BaseStrategy::new("ES_base", 12.5);
+    strategy.set_state(StrategyState::Trading);
+    
+    // Process a buy fill
+    let buy = Fill {
+        order_id: OrderId::new(1),
+        price: Price::from_raw(4500_00),  // 4500.00
+        quantity: Quantity::new(5),
+        side: Side::Buy,
+        is_maker: true,
+        timestamp: Timestamp::now(),
+        fee: 1.25,
+    };
+    strategy.update_position(&buy);
+    
+    // Update unrealized P&L
+    strategy.update_unrealized(Price::from_raw(4502_00));
+    
+    println!("Position: {}", strategy.position());
+    println!("Unrealized P&L: ${:.2}", strategy.total_pnl());
+    println!("Fill count: {}", strategy.fill_count());
+}
+```
+
+## See Also
+
+- [MarketMakerStrategy](/api/strategy/market-maker) - Market-making implementation
+- [SignalStrategy](/api/strategy/signals) - Signal-based trading
+- [Strategy Trait](/api/core/traits) - Core strategy interface

@@ -1,0 +1,360 @@
+---
+title: 'Price & Quantity Types'
+description: 'Fixed-point arithmetic for deterministic HFT calculations'
+---
+
+## Overview
+
+NanoARB uses fixed-point arithmetic for all price and quantity calculations to avoid floating-point errors and ensure deterministic behavior across backtests and live trading. This is critical for high-frequency trading where sub-tick precision matters.
+
+## Why Fixed-Point?
+
+Floating-point arithmetic has several issues for trading:
+
+```rust
+// Floating-point errors
+let price1 = 0.1 + 0.2;  // 0.30000000000000004
+let price2 = 0.3;         // 0.3
+assert_ne!(price1, price2); // Fails!
+```
+
+Fixed-point arithmetic:
+- **Deterministic**: Same results on all platforms
+- **Exact**: No rounding errors for decimal prices
+- **Fast**: Integer operations are faster than FP
+- **Reproducible**: Critical for backtest validation
+
+## Price Type
+
+Implemented in `nano-core/src/types/price.rs:42`:
+
+```rust
+pub struct Price(i64);
+```
+
+Prices are stored as **i64 integers** representing the smallest tick unit. For example, with 0.01 tick size:
+- $500.25 is stored as `50025`
+- $1000.00 is stored as `100000`
+
+### Creating Prices
+
+```rust
+use nano_core::types::Price;
+
+// From raw tick value
+let price = Price::from_raw(50025);
+assert_eq!(price.raw(), 50025);
+
+// From ticks with decimal places
+let price = Price::from_ticks(50025, 2); // 2 decimal places
+assert_eq!(price.as_f64(), 500.25);
+
+// From floating-point (use sparingly)
+let price = Price::from_f64(500.25, 0.01); // tick size = 0.01
+assert_eq!(price.raw(), 50025);
+```
+
+### Price Arithmetic
+
+All operations are on raw tick values:
+
+```rust
+let p1 = Price::from_raw(100);
+let p2 = Price::from_raw(50);
+
+// Addition
+assert_eq!((p1 + p2).raw(), 150);
+
+// Subtraction  
+assert_eq!((p1 - p2).raw(), 50);
+
+// Scalar multiplication
+assert_eq!((p1 * 2).raw(), 200);
+
+// Scalar division
+assert_eq!((p1 / 2).raw(), 50);
+```
+
+### Safe Arithmetic
+
+Use checked/saturating operations to prevent overflow:
+
+```rust
+// Saturating (clips at min/max)
+let big = Price::MAX;
+let result = big.saturating_add(Price::from_raw(1));
+assert_eq!(result, Price::MAX);
+
+// Checked (returns None on overflow)
+if let Some(sum) = p1.checked_add(p2) {
+    println!("Sum: {}", sum);
+}
+```
+
+### Price Comparison
+
+```rust
+let bid = Price::from_raw(50000);
+let ask = Price::from_raw(50025);
+
+assert!(ask > bid);
+assert_eq!(ask - bid, Price::from_raw(25)); // Spread
+
+// Calculate spread in basis points
+let spread_bps = (ask.raw() - bid.raw()) * 10000 / bid.raw();
+```
+
+### Conversion to Float
+
+```rust
+// Convert to f64 (assumes 0.01 tick size)
+let price = Price::from_raw(50025);
+assert_eq!(price.as_f64(), 500.25);
+
+// Convert with custom tick size
+let tick_size = 0.25; // CME ES tick size
+let price_f64 = price.as_f64_with_tick(tick_size);
+```
+
+## Quantity Type
+
+Implemented in `nano-core/src/types/quantity.rs:37`:
+
+```rust
+pub struct Quantity(u32);
+```
+
+Quantities are **unsigned 32-bit integers** representing contract/share counts:
+
+```rust
+use nano_core::types::Quantity;
+
+let qty = Quantity::new(100);
+assert_eq!(qty.value(), 100);
+assert!(!qty.is_zero());
+```
+
+### Quantity Arithmetic
+
+```rust
+let q1 = Quantity::new(100);
+let q2 = Quantity::new(50);
+
+// Addition
+assert_eq!((q1 + q2).value(), 150);
+
+// Subtraction
+assert_eq!((q1 - q2).value(), 50);
+
+// Multiplication
+assert_eq!((q1 * 2).value(), 200);
+
+// Division
+assert_eq!((q1 / 2).value(), 50);
+```
+
+### Saturating Operations
+
+```rust
+let q1 = Quantity::new(10);
+let q2 = Quantity::new(20);
+
+// Saturating subtraction (clips at 0)
+assert_eq!(q1.saturating_sub(q2), Quantity::ZERO);
+```
+
+## Signed Quantity
+
+For positions (long/short):
+
+```rust
+use nano_core::types::SignedQuantity;
+
+let long = SignedQuantity::new(100);   // Long 100
+let short = SignedQuantity::new(-50);  // Short 50
+
+assert!(long.is_long());
+assert!(short.is_short());
+
+let flat = SignedQuantity::ZERO;
+assert!(flat.is_flat());
+
+// Get absolute value
+assert_eq!(short.abs(), Quantity::new(50));
+```
+
+## Side Type
+
+Implemented in `nano-core/src/types/side.rs:24`:
+
+```rust
+pub enum Side {
+    Buy = 0,
+    Sell = 1,
+}
+```
+
+Used for order direction:
+
+```rust
+use nano_core::types::Side;
+
+let side = Side::Buy;
+assert!(side.is_buy());
+assert!(!side.is_sell());
+
+// Get opposite side
+assert_eq!(side.opposite(), Side::Sell);
+assert_eq!(!side, Side::Sell); // Using Not operator
+
+// Convert to sign multiplier
+assert_eq!(Side::Buy.sign(), 1);
+assert_eq!(Side::Sell.sign(), -1);
+```
+
+## Timestamp Type
+
+Nanosecond-precision timestamps in `nano-core/src/types/timestamp.rs:41`:
+
+```rust
+pub struct Timestamp(i64);
+```
+
+### Creating Timestamps
+
+```rust
+use nano_core::types::Timestamp;
+
+// Current time
+let now = Timestamp::now();
+
+// From nanoseconds since epoch
+let ts = Timestamp::from_nanos(1_000_000_000);
+assert_eq!(ts.as_secs(), 1);
+
+// From other units
+let ts = Timestamp::from_micros(1_000_000);  // 1 second
+let ts = Timestamp::from_millis(1_000);       // 1 second  
+let ts = Timestamp::from_secs(1);             // 1 second
+```
+
+### Timestamp Arithmetic
+
+```rust
+let t1 = Timestamp::from_nanos(1000);
+let t2 = Timestamp::from_nanos(500);
+
+// Calculate duration
+let duration_ns = t1.duration_since(t2);
+assert_eq!(duration_ns, 500);
+
+// Add/subtract nanoseconds
+let later = t1.add_nanos(100);
+assert_eq!(later.as_nanos(), 1100);
+
+let earlier = t1.sub_nanos(100);
+assert_eq!(earlier.as_nanos(), 900);
+```
+
+### Timestamp Comparison
+
+```rust
+let t1 = Timestamp::from_nanos(1000);
+let t2 = Timestamp::from_nanos(500);
+
+assert!(t1 > t2);
+assert!(t2 < t1);
+
+// Measure latency
+let send_time = Timestamp::now();
+// ... do work ...
+let recv_time = Timestamp::now();
+let latency_ns = recv_time - send_time;
+```
+
+## Practical Example: P&L Calculation
+
+Combining types for profit/loss calculation:
+
+```rust
+use nano_core::types::{Price, Quantity, Side};
+
+// Entry
+let entry_price = Price::from_raw(50000);
+let quantity = Quantity::new(10);
+let side = Side::Buy;
+
+// Exit
+let exit_price = Price::from_raw(50100);
+
+// Calculate P&L in ticks
+let price_diff = exit_price.raw() - entry_price.raw();
+let pnl_ticks = price_diff * quantity.value() as i64 * side.sign();
+
+// Convert to dollars (assuming $12.50 per tick)
+let tick_value = 12.5;
+let pnl_dollars = (pnl_ticks as f64) * tick_value / 100.0;
+
+assert_eq!(pnl_dollars, 125.0); // $125 profit
+```
+
+## Zero-Copy Serialization
+
+All types support zero-copy serialization via `rkyv`:
+
+```rust
+use rkyv::{Archive, Serialize, Deserialize};
+
+// Types are zero-copy serializable
+let price = Price::from_raw(50000);
+let bytes = rkyv::to_bytes::<_, 256>(&price).unwrap();
+
+// Deserialize without copying
+let archived = rkyv::check_archived_root::<Price>(&bytes).unwrap();
+assert_eq!(archived.raw(), 50000);
+```
+
+## Performance Characteristics
+
+### Memory Size
+
+- `Price`: 8 bytes (i64)
+- `Quantity`: 4 bytes (u32)
+- `SignedQuantity`: 8 bytes (i64)
+- `Side`: 1 byte (enum)
+- `Timestamp`: 8 bytes (i64)
+
+### Operation Speed
+
+All operations are single CPU instructions:
+- Addition/subtraction: ~1 CPU cycle
+- Multiplication/division: ~3-5 CPU cycles
+- Comparison: ~1 CPU cycle
+
+Compare to floating-point: 5-10x slower for same operations.
+
+## Best Practices
+
+1. **Always use fixed-point types** for prices and quantities
+2. **Avoid float conversions** until final display/logging
+3. **Use saturating arithmetic** when overflow is possible
+4. **Store tick size** with instrument metadata
+5. **Validate inputs** when converting from external sources
+
+```rust
+// Good: All fixed-point
+let bid = Price::from_raw(50000);
+let spread = Price::from_raw(25);
+let ask = bid + spread;
+
+// Bad: Mixing float and fixed-point
+let bid_f64 = 500.0;
+let spread = Price::from_raw(25);
+// Error: cannot add f64 and Price
+```
+
+## Related Topics
+
+- [Order Books](/concepts/order-books) - Using prices in order book operations
+- [Strategies](/concepts/strategies) - Price-based trading decisions
+- [Event-Driven Architecture](/concepts/event-driven) - Timestamp-based event ordering

@@ -1,122 +1,133 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "NanoARB",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#FF6B35",
+    "light": "#FFA726",
+    "dark": "#D84315"
   },
   "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/dhir1007/nanoARB"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/dhir1007/nanoARB"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Architecture",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "architecture/overview",
+              "architecture/crates",
+              "architecture/data-flow"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "concepts/order-books",
+              "concepts/price-types",
+              "concepts/strategies",
+              "concepts/event-driven"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Building Strategies",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "strategies/strategy-trait",
+              "strategies/market-making",
+              "strategies/signal-generation",
+              "strategies/rl-strategies"
+            ]
+          },
+          {
+            "group": "Backtesting",
+            "pages": [
+              "backtesting/configuration",
+              "backtesting/running-backtests",
+              "backtesting/performance-metrics"
+            ]
+          },
+          {
+            "group": "Data & Features",
+            "pages": [
+              "data/market-data-feeds",
+              "data/feature-extraction",
+              "data/ml-integration"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/monitoring",
+              "deployment/production"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Core",
             "pages": [
-              "api-reference/introduction"
+              "api/core/types",
+              "api/core/traits",
+              "api/core/errors"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Strategy",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/strategy/base",
+              "api/strategy/market-maker",
+              "api/strategy/signals"
+            ]
+          },
+          {
+            "group": "Backtest",
+            "pages": [
+              "api/backtest/engine",
+              "api/backtest/config",
+              "api/backtest/metrics"
+            ]
+          },
+          {
+            "group": "Order Book",
+            "pages": [
+              "api/lob/orderbook",
+              "api/lob/features"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "api/config/trading",
+              "api/config/risk",
+              "api/config/latency"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

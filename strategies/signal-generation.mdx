@@ -1,0 +1,561 @@
+---
+title: "Signal Generation"
+description: "Build signal-based trading strategies with ML models and feature engineering"
+---
+
+## Overview
+
+Signal-based strategies use predictions from ML models or statistical indicators to make trading decisions. NanoARB provides a flexible signal framework for:
+
+- Feature-based signal generation
+- Confidence-based position sizing
+- Signal validation and filtering
+- Integration with ML models
+
+## Signal Structure
+
+The `Signal` struct represents a trading signal:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Signal {
+    /// Signal direction: -1 (sell), 0 (neutral), +1 (buy)
+    pub direction: i8,
+    /// Signal strength (0 to 1)
+    pub strength: f32,
+    /// Confidence from model
+    pub confidence: f32,
+    /// Signal timestamp
+    pub timestamp: Timestamp,
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:38-49`
+
+### Creating Signals
+
+```rust
+use nano_strategy::signals::Signal;
+use nano_core::types::Timestamp;
+
+// Buy signal
+let buy_signal = Signal::buy(
+    0.8,  // strength (0-1)
+    0.75, // confidence (0-1)
+    Timestamp::now()
+);
+
+// Sell signal
+let sell_signal = Signal::sell(
+    0.6,  // strength
+    0.65, // confidence
+    Timestamp::now()
+);
+
+// Neutral signal (no action)
+let neutral = Signal::neutral(Timestamp::now());
+```
+
+**Location:** `nano-strategy/src/signals.rs:52-83`
+
+### Signal Methods
+
+```rust
+impl Signal {
+    /// Check if signal suggests buying
+    pub fn is_buy(&self) -> bool;
+
+    /// Check if signal suggests selling
+    pub fn is_sell(&self) -> bool;
+
+    /// Check if signal is neutral
+    pub fn is_neutral(&self) -> bool;
+
+    /// Get the side for order placement
+    pub fn side(&self) -> Option<Side>;
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:85-112`
+
+## SignalConfig
+
+Configure signal-based trading:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct SignalConfig {
+    /// Minimum confidence threshold
+    pub min_confidence: f32,
+    /// Minimum prediction magnitude
+    pub min_magnitude: f32,
+    /// Position sizing based on confidence
+    pub confidence_scaling: bool,
+    /// Maximum position size (as fraction)
+    pub max_position_size: f32,
+    /// Target profit in ticks
+    pub target_ticks: i64,
+    /// Stop loss in ticks
+    pub stop_ticks: i64,
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:8-23`
+
+### Default Configuration
+
+```rust
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence: 0.55,
+            min_magnitude: 0.001,
+            confidence_scaling: true,
+            max_position_size: 1.0,
+            target_ticks: 10,
+            stop_ticks: 5,
+        }
+    }
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:25-36`
+
+## SignalStrategy
+
+The `SignalStrategy` executes trades based on signals:
+
+```rust
+pub struct SignalStrategy {
+    base: BaseStrategy,
+    config: SignalConfig,
+    instrument_id: u32,
+    order_size: u32,
+    max_position: i64,
+    pending_order: Option<OrderId>,
+    last_signal: Option<Signal>,
+    next_order_id: u64,
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:114-132`
+
+### Creating a Signal Strategy
+
+```rust
+use nano_strategy::signals::{SignalStrategy, SignalConfig};
+
+let config = SignalConfig {
+    min_confidence: 0.6,
+    min_magnitude: 0.002,
+    confidence_scaling: true,
+    max_position_size: 1.0,
+    target_ticks: 15,
+    stop_ticks: 7,
+};
+
+let mut strategy = SignalStrategy::new(
+    "ml_signal_strategy",
+    instrument_id,
+    config,
+    10,   // order_size
+    100,  // max_position
+    12.5, // tick_value
+);
+```
+
+**Location:** `nano-strategy/src/signals.rs:135-155`
+
+## Processing Signals
+
+The strategy processes signals and generates orders:
+
+```rust
+pub fn process_signal(&mut self, signal: &Signal, book: &dyn OrderBook) -> Vec<Order> {
+    let mut orders = Vec::new();
+
+    // Don't trade if we have a pending order
+    if self.pending_order.is_some() {
+        return orders;
+    }
+
+    // Check signal confidence
+    if signal.confidence < self.config.min_confidence {
+        return orders;
+    }
+
+    self.last_signal = Some(signal.clone());
+
+    // Check if signal suggests trading
+    let side = match signal.side() {
+        Some(s) => s,
+        None => return orders, // Neutral signal
+    };
+
+    // Get current price
+    let current_price = match book.mid_price() {
+        Some(p) => p,
+        None => return orders,
+    };
+
+    // Check position limits
+    let current_pos = self.base.position();
+    let order_qty = self.calculate_order_size(signal, current_pos);
+
+    if order_qty == 0 {
+        return orders;
+    }
+
+    // Calculate order price
+    let order_price = match side {
+        Side::Buy => book.best_bid().map_or(current_price, |(p, _)| p),
+        Side::Sell => book.best_ask().map_or(current_price, |(p, _)| p),
+    };
+
+    let order_id = OrderId::new(self.next_order_id);
+    self.next_order_id += 1;
+
+    let order = Order::new_limit(
+        order_id,
+        self.instrument_id,
+        side,
+        order_price,
+        Quantity::new(order_qty),
+        TimeInForce::IOC,
+    );
+
+    self.pending_order = Some(order_id);
+    orders.push(order);
+
+    orders
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:157-215`
+
+## Confidence-Based Sizing
+
+Order size scales with signal strength:
+
+```rust
+fn calculate_order_size(&self, signal: &Signal, current_pos: i64) -> u32 {
+    let base_size = if self.config.confidence_scaling {
+        (self.order_size as f32 * signal.strength) as u32
+    } else {
+        self.order_size
+    };
+
+    // Check position limits
+    let max_buy = (self.max_position - current_pos).max(0) as u32;
+    let max_sell = (self.max_position + current_pos).max(0) as u32;
+
+    match signal.side() {
+        Some(Side::Buy) => base_size.min(max_buy),
+        Some(Side::Sell) => base_size.min(max_sell),
+        None => 0,
+    }
+}
+```
+
+**Location:** `nano-strategy/src/signals.rs:217-234`
+
+### Example
+
+```rust
+// With confidence_scaling = true and order_size = 10
+
+// Strong signal (strength = 0.9)
+let strong_signal = Signal::buy(0.9, 0.75, Timestamp::now());
+let order_size = strategy.calculate_order_size(&strong_signal, 0);
+// order_size = 10 * 0.9 = 9 contracts
+
+// Weak signal (strength = 0.5)
+let weak_signal = Signal::buy(0.5, 0.65, Timestamp::now());
+let order_size = strategy.calculate_order_size(&weak_signal, 0);
+// order_size = 10 * 0.5 = 5 contracts
+```
+
+## Integration with ML Models
+
+Integrate signals with ML model predictions:
+
+```rust
+use nano_core::traits::ModelInference;
+use nano_strategy::signals::{Signal, SignalStrategy};
+
+// Define your model output
+struct ModelPrediction {
+    direction: i8,  // -1, 0, or 1
+    probability: f32,
+    magnitude: f32,
+}
+
+// Convert model prediction to signal
+fn prediction_to_signal(pred: ModelPrediction) -> Signal {
+    if pred.direction > 0 {
+        Signal::buy(
+            pred.magnitude,
+            pred.probability,
+            Timestamp::now()
+        )
+    } else if pred.direction < 0 {
+        Signal::sell(
+            pred.magnitude,
+            pred.probability,
+            Timestamp::now()
+        )
+    } else {
+        Signal::neutral(Timestamp::now())
+    }
+}
+
+// In your trading loop
+loop {
+    // Get features from order book
+    let features = extract_features(&book);
+
+    // Run model inference
+    let prediction = model.predict(&features)?;
+
+    // Convert to signal
+    let signal = prediction_to_signal(prediction);
+
+    // Process signal
+    let orders = strategy.process_signal(&signal, &book);
+
+    // Submit orders
+    for order in orders {
+        execution_handler.submit_order(order)?;
+    }
+}
+```
+
+## Feature Engineering
+
+Extract features from order book for signal generation:
+
+```rust
+use nano_core::traits::OrderBook;
+
+pub struct OrderBookFeatures {
+    pub mid_price: f64,
+    pub spread: f64,
+    pub bid_depth: f64,
+    pub ask_depth: f64,
+    pub imbalance: f64,
+    pub volatility: f64,
+}
+
+impl OrderBookFeatures {
+    pub fn extract(book: &dyn OrderBook) -> Option<Self> {
+        let mid = book.mid_price()?.as_f64();
+        let spread = book.spread()?.as_f64();
+
+        // Calculate order book imbalance
+        let bid_depth = book.bid_depth(5).value() as f64;
+        let ask_depth = book.ask_depth(5).value() as f64;
+        let total_depth = bid_depth + ask_depth;
+        let imbalance = if total_depth > 0.0 {
+            (bid_depth - ask_depth) / total_depth
+        } else {
+            0.0
+        };
+
+        Some(Self {
+            mid_price: mid,
+            spread,
+            bid_depth,
+            ask_depth,
+            imbalance,
+            volatility: 0.0, // Calculate from price history
+        })
+    }
+
+    pub fn to_array(&self) -> Vec<f32> {
+        vec![
+            self.mid_price as f32,
+            self.spread as f32,
+            self.bid_depth as f32,
+            self.ask_depth as f32,
+            self.imbalance as f32,
+            self.volatility as f32,
+        ]
+    }
+}
+```
+
+## Signal Filtering
+
+Implement filters to improve signal quality:
+
+```rust
+pub struct SignalFilter {
+    min_confidence: f32,
+    min_strength: f32,
+    max_age_ns: i64,
+}
+
+impl SignalFilter {
+    pub fn should_trade(&self, signal: &Signal, current_time: Timestamp) -> bool {
+        // Check confidence threshold
+        if signal.confidence < self.min_confidence {
+            return false;
+        }
+
+        // Check strength threshold
+        if signal.strength < self.min_strength {
+            return false;
+        }
+
+        // Check signal age
+        let age = current_time.as_nanos() - signal.timestamp.as_nanos();
+        if age > self.max_age_ns {
+            return false;
+        }
+
+        // Check for neutral signal
+        if signal.is_neutral() {
+            return false;
+        }
+
+        true
+    }
+}
+```
+
+## Complete Example
+
+```rust
+use nano_strategy::signals::{Signal, SignalStrategy, SignalConfig};
+use nano_core::traits::Strategy;
+
+// Configure the signal strategy
+let config = SignalConfig {
+    min_confidence: 0.6,
+    min_magnitude: 0.002,
+    confidence_scaling: true,
+    max_position_size: 1.0,
+    target_ticks: 15,
+    stop_ticks: 7,
+};
+
+// Create the strategy
+let mut strategy = SignalStrategy::new(
+    "my_signal_strategy",
+    1, // instrument_id
+    config,
+    10,   // order_size
+    100,  // max_position
+    12.5, // tick_value
+);
+
+// Trading loop
+loop {
+    // Extract features
+    let features = extract_features(&book)?;
+
+    // Generate signal from ML model
+    let prediction = model.predict(&features)?;
+    let signal = Signal::buy(
+        prediction.strength,
+        prediction.confidence,
+        Timestamp::now()
+    );
+
+    // Process signal and get orders
+    let orders = strategy.process_signal(&signal, &book);
+
+    // Submit orders
+    for order in orders {
+        execution_handler.submit_order(order)?;
+    }
+
+    // Handle fills
+    if let Some(fill) = execution_handler.next_fill() {
+        strategy.on_fill(&fill);
+    }
+
+    // Monitor performance
+    if let Some(last_signal) = strategy.last_signal() {
+        println!("Last signal: direction={}, confidence={:.2}",
+                 last_signal.direction, last_signal.confidence);
+    }
+    println!("Position: {}, P&L: ${:.2}",
+             strategy.position(), strategy.pnl());
+}
+```
+
+## Best Practices
+
+1. **Set appropriate confidence thresholds** - Start with `min_confidence >= 0.6` to filter weak signals
+
+2. **Use confidence scaling** - Let strong signals trade larger sizes:
+   ```rust
+   config.confidence_scaling = true;
+   ```
+
+3. **Validate signals before trading** - Check age, confidence, and magnitude:
+   ```rust
+   if signal.confidence < 0.6 || signal.strength < 0.5 {
+       return Vec::new();
+   }
+   ```
+
+4. **Track signal performance** - Monitor which signals are profitable:
+   ```rust
+   if let Some(last_signal) = strategy.last_signal() {
+       metrics.record_signal_performance(last_signal, strategy.pnl());
+   }
+   ```
+
+5. **Combine multiple signals** - Aggregate predictions from multiple models:
+   ```rust
+   let combined_signal = combine_signals(vec![signal1, signal2, signal3]);
+   ```
+
+## Signal Sources
+
+### Order Book Imbalance
+
+```rust
+let bid_depth = book.bid_depth(5);
+let ask_depth = book.ask_depth(5);
+let imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth);
+
+let signal = if imbalance > 0.2 {
+    Signal::buy(imbalance as f32, 0.7, Timestamp::now())
+} else if imbalance < -0.2 {
+    Signal::sell((-imbalance) as f32, 0.7, Timestamp::now())
+} else {
+    Signal::neutral(Timestamp::now())
+};
+```
+
+### Price Momentum
+
+```rust
+let returns: Vec<f64> = price_history.windows(2)
+    .map(|w| (w[1] - w[0]) / w[0])
+    .collect();
+
+let momentum = returns.iter().sum::<f64>() / returns.len() as f64;
+
+let signal = if momentum > 0.001 {
+    Signal::buy(momentum as f32 * 100.0, 0.65, Timestamp::now())
+} else if momentum < -0.001 {
+    Signal::sell((-momentum) as f32 * 100.0, 0.65, Timestamp::now())
+} else {
+    Signal::neutral(Timestamp::now())
+};
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="RL Strategies" icon="brain" href="/strategies/rl-strategies">
+    Train RL agents to generate optimal signals
+  </Card>
+  <Card title="Market Making" icon="chart-line" href="/strategies/market-making">
+    Combine signals with market making
+  </Card>
+</CardGroup>

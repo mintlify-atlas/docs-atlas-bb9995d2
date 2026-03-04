@@ -1,0 +1,497 @@
+---
+title: 'MarketMakerStrategy'
+description: 'Automated market-making with inventory management and quote generation'
+---
+
+## Overview
+
+The `MarketMakerStrategy` implements an automated market-making strategy with:
+- Multi-level quote generation
+- Inventory-based price skewing
+- Position limit management
+- Quote lifecycle tracking
+- Configurable spread and refresh intervals
+
+This strategy continuously provides liquidity by placing limit orders on both sides of the market.
+
+## MarketMakerConfig
+
+```rust
+pub struct MarketMakerConfig {
+    pub base_spread_ticks: i64,        // Base spread in ticks
+    pub inventory_skew_factor: f64,    // Spread skew based on inventory (-1 to +1)
+    pub max_inventory: i64,            // Maximum inventory (position limit)
+    pub order_size: u32,               // Order size per level
+    pub num_levels: usize,             // Number of levels to quote
+    pub min_edge_ticks: i64,           // Minimum edge required (in ticks)
+    pub cancel_distance_ticks: i64,    // Cancel distance from BBO (in ticks)
+    pub tick_size: i64,                // Tick size
+    pub refresh_interval_ns: i64,      // Refresh interval (in nanoseconds)
+}
+```
+
+### Configuration Parameters
+
+#### base_spread_ticks
+
+The base spread between bid and ask quotes, measured in ticks.
+
+**Default:** `2`
+
+**Example:**
+```rust
+// With base_spread_ticks = 2 and tick_size = 25:
+// If mid = 50000, bid = 49975, ask = 50025
+```
+
+#### inventory_skew_factor
+
+Controls how much to skew quotes based on current inventory position. Range: 0.0 to 1.0.
+
+**Default:** `0.5`
+
+**Behavior:**
+- Positive inventory (long) → Lower bids, higher asks (encourage selling)
+- Negative inventory (short) → Higher bids, lower asks (encourage buying)
+- Factor of 0.0 → No skew
+- Factor of 1.0 → Maximum skew
+
+**Formula:**
+```rust
+inv_ratio = position / max_inventory  // -1.0 to +1.0
+skew_ticks = inv_ratio * inventory_skew_factor * base_spread_ticks
+```
+
+#### max_inventory
+
+Maximum absolute position size allowed. Strategy stops quoting on a side when this limit is reached.
+
+**Default:** `50`
+
+**Example:**
+```rust
+let config = MarketMakerConfig {
+    max_inventory: 100,
+    ..Default::default()
+};
+// Position of +100 → Stop placing buy orders
+// Position of -100 → Stop placing sell orders
+```
+
+#### order_size
+
+Quantity of contracts for each quote order.
+
+**Default:** `5`
+
+#### num_levels
+
+Number of price levels to quote on each side of the market.
+
+**Default:** `3`
+
+**Example:**
+```rust
+// With num_levels = 3, tick_size = 25:
+// Bid levels: [50000, 49975, 49950]
+// Ask levels: [50025, 50050, 50075]
+```
+
+#### min_edge_ticks
+
+Minimum edge required before placing quotes (currently not actively used in implementation).
+
+**Default:** `1`
+
+#### cancel_distance_ticks
+
+Distance from the best bid/offer at which to cancel stale orders.
+
+**Default:** `10`
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:229-252
+
+#### tick_size
+
+Raw price units per tick.
+
+**Default:** `25`
+
+#### refresh_interval_ns
+
+How often to refresh quotes, in nanoseconds.
+
+**Default:** `100_000_000` (100ms)
+
+### Default Configuration
+
+```rust
+impl Default for MarketMakerConfig {
+    fn default() -> Self {
+        Self {
+            base_spread_ticks: 2,
+            inventory_skew_factor: 0.5,
+            max_inventory: 50,
+            order_size: 5,
+            num_levels: 3,
+            min_edge_ticks: 1,
+            cancel_distance_ticks: 10,
+            tick_size: 25,
+            refresh_interval_ns: 100_000_000, // 100ms
+        }
+    }
+}
+```
+
+## QuoteManager
+
+Manages the lifecycle of active quote orders.
+
+```rust
+pub struct QuoteManager {
+    bid_orders: HashMap<OrderId, (Price, Quantity)>,
+    ask_orders: HashMap<OrderId, (Price, Quantity)>,
+    next_order_id: u64,
+    pending_acks: HashMap<OrderId, Side>,
+}
+```
+
+### Methods
+
+#### new
+
+```rust
+pub fn new() -> Self
+```
+
+Creates a new quote manager.
+
+#### next_order_id
+
+```rust
+pub fn next_order_id(&mut self) -> OrderId
+```
+
+Generates the next unique order ID.
+
+#### on_order_submit
+
+```rust
+pub fn on_order_submit(
+    &mut self,
+    order_id: OrderId,
+    side: Side,
+    price: Price,
+    quantity: Quantity,
+)
+```
+
+Records a submitted order and marks it as pending acknowledgment.
+
+#### on_order_ack
+
+```rust
+pub fn on_order_ack(&mut self, order_id: OrderId)
+```
+
+Removes the order from pending acknowledgments.
+
+#### on_order_reject
+
+```rust
+pub fn on_order_reject(&mut self, order_id: OrderId)
+```
+
+Removes a rejected order from tracking.
+
+#### on_fill
+
+```rust
+pub fn on_fill(&mut self, order_id: OrderId, fill_qty: Quantity)
+```
+
+Updates remaining quantity after a fill. Removes the order if fully filled.
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:108-122
+
+#### on_cancel
+
+```rust
+pub fn on_cancel(&mut self, order_id: OrderId)
+```
+
+Removes a cancelled order from tracking.
+
+#### Quantity Tracking
+
+```rust
+pub fn total_bid_quantity(&self) -> Quantity
+pub fn total_ask_quantity(&self) -> Quantity
+```
+
+Returns total outstanding quantity on bids or asks.
+
+#### Order Lists
+
+```rust
+pub fn bid_order_ids(&self) -> Vec<OrderId>
+pub fn ask_order_ids(&self) -> Vec<OrderId>
+```
+
+Returns all active order IDs for bids or asks.
+
+## MarketMakerStrategy
+
+```rust
+pub struct MarketMakerStrategy {
+    base: BaseStrategy,
+    config: MarketMakerConfig,
+    quotes: QuoteManager,
+    instrument_id: u32,
+    last_quote_time: Timestamp,
+    fair_value: Option<Price>,
+}
+```
+
+### Constructor
+
+#### new
+
+```rust
+pub fn new(
+    name: &str,
+    instrument_id: u32,
+    config: MarketMakerConfig,
+    tick_value: f64,
+) -> Self
+```
+
+Creates a new market-making strategy.
+
+**Parameters:**
+- `name`: Strategy identifier
+- `instrument_id`: ID of the instrument to trade
+- `config`: Market maker configuration
+- `tick_value`: Value of one tick for P&L calculation
+
+**Example:**
+```rust
+use nano_strategy::{MarketMakerStrategy, MarketMakerConfig};
+
+let config = MarketMakerConfig {
+    base_spread_ticks: 2,
+    max_inventory: 100,
+    order_size: 10,
+    num_levels: 5,
+    ..Default::default()
+};
+
+let mut strategy = MarketMakerStrategy::new(
+    "ES_MM",
+    101,     // instrument_id
+    config,
+    12.5,    // tick_value for ES futures
+);
+```
+
+### Core Methods
+
+#### calculate_quotes
+
+```rust
+fn calculate_quotes(&self, mid: Price) -> (Price, Price)
+```
+
+Calculates bid and ask prices with inventory skew applied.
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:197-222
+
+**Algorithm:**
+1. Calculate inventory ratio: `position / max_inventory`
+2. Calculate skew in ticks: `inv_ratio * skew_factor * base_spread`
+3. Apply skew to bid/ask prices around mid
+
+**Example:**
+```rust
+// Position: +50, Max: 100, Skew Factor: 0.5, Base Spread: 2 ticks
+// inv_ratio = 50/100 = 0.5
+// skew_ticks = 0.5 * 0.5 * 2 = 0.5 ticks
+// If mid = 50000, tick_size = 25:
+// bid = 50000 - 25 - 12 = 49963 (lowered)
+// ask = 50000 + 25 - 12 = 50013 (lowered)
+// Net effect: Encourages selling to reduce long position
+```
+
+#### should_refresh_quotes
+
+```rust
+fn should_refresh_quotes(&self, current_time: Timestamp) -> bool
+```
+
+Checks if enough time has passed since the last quote update.
+
+#### generate_quotes
+
+```rust
+fn generate_quotes(
+    &mut self,
+    book: &dyn OrderBook,
+    current_time: Timestamp,
+) -> Vec<Order>
+```
+
+Generates new quote orders across multiple levels.
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:255-322
+
+**Process:**
+1. Check if mid price is available
+2. Check position limits (stop quoting if at max)
+3. Calculate skewed bid/ask prices
+4. Generate orders for each level
+5. Record orders in quote manager
+6. Update last quote time
+
+#### generate_cancels
+
+```rust
+fn generate_cancels(&self, book: &dyn OrderBook) -> Vec<OrderId>
+```
+
+Identifies orders that are too far from the best bid/offer and should be cancelled.
+
+### Accessor Methods
+
+#### quotes
+
+```rust
+pub fn quotes(&self) -> &QuoteManager
+```
+
+Returns a reference to the quote manager.
+
+#### config
+
+```rust
+pub fn config(&self) -> &MarketMakerConfig
+```
+
+Returns the strategy configuration.
+
+#### fair_value
+
+```rust
+pub fn fair_value(&self) -> Option<Price>
+```
+
+Returns the current fair value estimate (mid price).
+
+## Strategy Implementation
+
+The `MarketMakerStrategy` implements the `Strategy` trait:
+
+### on_market_data
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:348-366
+
+Called when market data updates:
+1. Updates base strategy (P&L, position)
+2. Checks if strategy is ready
+3. Checks if quotes need refreshing
+4. Generates new quotes if refresh interval elapsed
+
+### on_fill
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:368-371
+
+Handles fill events:
+1. Updates position and P&L via base strategy
+2. Updates remaining quantity in quote manager
+
+### on_order_ack, on_order_reject, on_order_cancel
+
+file:///home/daytona/workspace/source/crates/nano-strategy/src/market_maker.rs:373-384
+
+Forward order lifecycle events to the quote manager.
+
+## Complete Example
+
+```rust
+use nano_strategy::{MarketMakerStrategy, MarketMakerConfig, StrategyState};
+use nano_core::traits::{Strategy, OrderBook};
+use nano_core::types::TimeInForce;
+
+fn main() {
+    // Configure the market maker
+    let config = MarketMakerConfig {
+        base_spread_ticks: 2,      // 2 tick spread
+        inventory_skew_factor: 0.6, // Moderate skew
+        max_inventory: 200,         // Max 200 contracts
+        order_size: 10,            // 10 contracts per order
+        num_levels: 3,             // Quote 3 levels deep
+        min_edge_ticks: 1,
+        cancel_distance_ticks: 10, // Cancel if 10 ticks away
+        tick_size: 25,             // 0.25 price increment
+        refresh_interval_ns: 100_000_000, // 100ms
+    };
+    
+    let mut strategy = MarketMakerStrategy::new(
+        "ES_MarketMaker",
+        101,    // ES futures instrument ID
+        config,
+        12.5,   // $12.50 per tick
+    );
+    
+    // Set to trading state
+    strategy.base.set_state(StrategyState::Trading);
+    
+    // In your main loop:
+    // let orders = strategy.on_market_data(&order_book);
+    // for order in orders {
+    //     exchange.submit_order(order);
+    // }
+    
+    // Monitor position and P&L
+    println!("Position: {}", strategy.position());
+    println!("P&L: ${:.2}", strategy.pnl());
+    println!("Active bids: {}", strategy.quotes().bid_order_ids().len());
+    println!("Active asks: {}", strategy.quotes().ask_order_ids().len());
+}
+```
+
+## Inventory Management
+
+The strategy implements inventory risk management through:
+
+1. **Position Limits**: Stops quoting when `max_inventory` is reached
+2. **Price Skewing**: Adjusts quotes to encourage inventory reduction
+3. **Symmetric Limits**: Applies limits to both long and short positions
+
+**Example Scenario:**
+```rust
+// Config: max_inventory = 100, skew_factor = 0.5
+
+// Position: 0 (flat)
+// Bid: Mid - 1 tick, Ask: Mid + 1 tick (symmetric)
+
+// Position: +80 (long)
+// Bid: Mid - 1.4 ticks, Ask: Mid + 0.6 ticks (skewed down)
+// Encourages selling to reduce inventory
+
+// Position: +100 (max long)
+// Bid: None (stopped), Ask: Active
+// Only allows position reduction
+```
+
+## Performance Considerations
+
+- Quote refresh is throttled by `refresh_interval_ns`
+- Old quotes beyond `cancel_distance_ticks` are cancelled
+- All order tracking uses efficient HashMap lookups
+- Position checks prevent over-trading
+
+## See Also
+
+- [BaseStrategy](/api/strategy/base) - Base strategy implementation
+- [SignalStrategy](/api/strategy/signals) - Signal-based trading
+- [QuoteManager](/api/strategy/market-maker#quotemanager) - Quote lifecycle management

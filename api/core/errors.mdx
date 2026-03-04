@@ -1,0 +1,528 @@
+---
+title: Error Handling
+description: Error types and result handling patterns
+icon: circle-exclamation
+---
+
+## Overview
+
+NanoARB uses Rust's type-safe error handling with the `Result` type. All errors implement the `thiserror::Error` trait for consistent error messages and conversions.
+
+## Error Type
+
+The core `Error` enum defines all possible error conditions.
+
+### Definition
+
+```rust
+#[derive(Error, Debug, Clone)]
+pub enum Error {
+    #[error("Invalid price: {0}")]
+    InvalidPrice(String),
+    
+    #[error("Invalid quantity: {0}")]
+    InvalidQuantity(String),
+    
+    #[error("Invalid order ID: {0}")]
+    InvalidOrderId(String),
+    
+    #[error("Invalid timestamp: {0}")]
+    InvalidTimestamp(String),
+    
+    #[error("Invalid instrument: {0}")]
+    InvalidInstrument(String),
+    
+    #[error("Order not found: {0}")]
+    OrderNotFound(u64),
+    
+    #[error("Insufficient liquidity at price {price} for quantity {quantity}")]
+    InsufficientLiquidity {
+        price: String,
+        quantity: String,
+    },
+    
+    #[error("Risk limit exceeded: {0}")]
+    RiskLimitExceeded(String),
+    
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+    
+    #[error("I/O error: {0}")]
+    IoError(String),
+    
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+    
+    #[error("Model inference error: {0}")]
+    ModelError(String),
+    
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
+```
+
+## Result Type
+
+A type alias for convenience.
+
+```rust
+pub type Result<T> = std::result::Result<T, Error>;
+```
+
+## Error Variants
+
+### InvalidPrice
+
+Returned when a price value is invalid.
+
+<ResponseField name="InvalidPrice" type="Error">
+  ```rust
+  return Err(Error::InvalidPrice("negative value".to_string()));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Negative prices where not allowed
+- Price exceeds maximum allowed value
+- Invalid price format in parsing
+
+### InvalidQuantity
+
+Returned when a quantity value is invalid.
+
+<ResponseField name="InvalidQuantity" type="Error">
+  ```rust
+  if qty == 0 {
+      return Err(Error::InvalidQuantity("quantity cannot be zero".to_string()));
+  }
+  ```
+</ResponseField>
+
+**Common causes:**
+- Zero quantity for orders
+- Quantity exceeds maximum
+- Invalid quantity format
+
+### InvalidOrderId
+
+Returned when an order ID is invalid.
+
+<ResponseField name="InvalidOrderId" type="Error">
+  ```rust
+  return Err(Error::InvalidOrderId("order ID must be positive".to_string()));
+  ```
+</ResponseField>
+
+### InvalidTimestamp
+
+Returned when a timestamp value is invalid.
+
+<ResponseField name="InvalidTimestamp" type="Error">
+  ```rust
+  return Err(Error::InvalidTimestamp("timestamp in the future".to_string()));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Timestamps in the future (when not allowed)
+- Timestamps before Unix epoch (when not allowed)
+- Invalid timestamp format
+
+### InvalidInstrument
+
+Returned when an instrument identifier is invalid.
+
+<ResponseField name="InvalidInstrument" type="Error">
+  ```rust
+  return Err(Error::InvalidInstrument(
+      format!("unknown instrument: {}", symbol)
+  ));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Unknown instrument symbol
+- Instrument not configured
+- Invalid instrument ID
+
+### OrderNotFound
+
+Returned when an order cannot be found.
+
+<ResponseField name="OrderNotFound" type="Error">
+  ```rust
+  return Err(Error::OrderNotFound(order_id.value()));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Attempting to cancel non-existent order
+- Querying order that was never created
+- Order ID typo
+
+### InsufficientLiquidity
+
+Returned when there's not enough liquidity to fill an order.
+
+<ResponseField name="InsufficientLiquidity" type="Error">
+  ```rust
+  return Err(Error::InsufficientLiquidity {
+      price: format!("{}", price),
+      quantity: format!("{}", qty),
+  });
+  ```
+</ResponseField>
+
+**Common causes:**
+- Market order larger than available liquidity
+- Thin order book
+- Attempting to fill at specific price level with insufficient depth
+
+### RiskLimitExceeded
+
+Returned when a risk limit is breached.
+
+<ResponseField name="RiskLimitExceeded" type="Error">
+  ```rust
+  return Err(Error::RiskLimitExceeded(
+      format!("position {} exceeds max {}", position, max_position)
+  ));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Position limit exceeded
+- Order size too large
+- Drawdown limit breached
+- Daily loss limit hit
+
+### ParseError
+
+Returned when parsing fails.
+
+<ResponseField name="ParseError" type="Error">
+  ```rust
+  return Err(Error::ParseError(
+      format!("failed to parse timestamp: {}", s)
+  ));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Invalid data format
+- Malformed configuration
+- Corrupt market data
+
+### ConfigError
+
+Returned when configuration is invalid.
+
+<ResponseField name="ConfigError" type="Error">
+  ```rust
+  return Err(Error::ConfigError(
+      "missing required field 'instrument_id'".to_string()
+  ));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Missing configuration fields
+- Invalid configuration values
+- Conflicting configuration options
+
+### IoError
+
+Returned when I/O operations fail.
+
+<ResponseField name="IoError" type="Error">
+  ```rust
+  // Automatically converted from std::io::Error
+  let file = File::open("data.bin")?;
+  ```
+</ResponseField>
+
+**Common causes:**
+- File not found
+- Permission denied
+- Disk full
+- Network connection lost
+
+### SerializationError
+
+Returned when serialization/deserialization fails.
+
+<ResponseField name="SerializationError" type="Error">
+  ```rust
+  // Automatically converted from bincode::Error or serde_json::Error
+  let data = bincode::serialize(&order)?;
+  ```
+</ResponseField>
+
+**Common causes:**
+- Invalid data format
+- Version mismatch
+- Corrupt data
+
+### ModelError
+
+Returned when ML model inference fails.
+
+<ResponseField name="ModelError" type="Error">
+  ```rust
+  return Err(Error::ModelError(
+      "model input shape mismatch".to_string()
+  ));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Invalid input shape
+- Model not loaded
+- Inference timeout
+- GPU out of memory
+
+### Internal
+
+Returned for unexpected internal errors.
+
+<ResponseField name="Internal" type="Error">
+  ```rust
+  return Err(Error::Internal(
+      "unexpected state: order book empty".to_string()
+  ));
+  ```
+</ResponseField>
+
+**Common causes:**
+- Invariant violations
+- Unexpected state
+- Programming errors
+
+## Error Handling Patterns
+
+### Basic Error Handling
+
+```rust
+use nano_core::{Error, Result};
+
+fn submit_order(order: Order) -> Result<OrderId> {
+    // Validate order
+    if order.quantity.is_zero() {
+        return Err(Error::InvalidQuantity(
+            "quantity cannot be zero".to_string()
+        ));
+    }
+    
+    // Submit order
+    Ok(order.id)
+}
+
+// Usage
+match submit_order(order) {
+    Ok(order_id) => println!("Order submitted: {}", order_id),
+    Err(e) => eprintln!("Failed to submit order: {}", e),
+}
+```
+
+### Using the ? Operator
+
+The `?` operator propagates errors up the call stack.
+
+```rust
+fn process_fill(fill: &Fill) -> Result<()> {
+    let order = get_order(fill.order_id)?;  // Propagates Error::OrderNotFound
+    update_position(order.side, fill.quantity)?;
+    calculate_pnl(fill)?;
+    Ok(())
+}
+```
+
+### Error Context
+
+Add context to errors for better debugging.
+
+```rust
+fn load_config(path: &str) -> Result<Config> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| Error::IoError(
+            format!("failed to read config from {}: {}", path, e)
+        ))?;
+    
+    let config: Config = serde_json::from_str(&contents)
+        .map_err(|e| Error::ConfigError(
+            format!("invalid config format: {}", e)
+        ))?;
+    
+    Ok(config)
+}
+```
+
+### Handling Specific Errors
+
+```rust
+match submit_order(order) {
+    Ok(order_id) => {
+        println!("Order {} submitted", order_id);
+    }
+    Err(Error::RiskLimitExceeded(msg)) => {
+        eprintln!("Risk check failed: {}", msg);
+        // Maybe retry with smaller size
+    }
+    Err(Error::InsufficientLiquidity { price, quantity }) => {
+        eprintln!("Not enough liquidity at {} for {}", price, quantity);
+        // Maybe adjust price
+    }
+    Err(e) => {
+        eprintln!("Order submission failed: {}", e);
+    }
+}
+```
+
+### Converting Errors
+
+Standard library errors are automatically converted.
+
+```rust
+use std::io;
+use nano_core::Result;
+
+fn read_data(path: &str) -> Result<Vec<u8>> {
+    // io::Error is automatically converted to Error::IoError
+    let data = std::fs::read(path)?;
+    Ok(data)
+}
+
+fn deserialize_order(data: &[u8]) -> Result<Order> {
+    // bincode::Error is automatically converted to Error::SerializationError
+    let order = bincode::deserialize(data)?;
+    Ok(order)
+}
+```
+
+### Logging Errors
+
+```rust
+use log::{error, warn};
+
+fn handle_fill(fill: &Fill) -> Result<()> {
+    if let Err(e) = process_fill(fill) {
+        match e {
+            Error::OrderNotFound(id) => {
+                warn!("Order {} not found, possibly already processed", id);
+            }
+            Error::RiskLimitExceeded(ref msg) => {
+                error!("Risk limit exceeded: {}", msg);
+                // Trigger emergency procedures
+                trigger_kill_switch();
+            }
+            _ => {
+                error!("Failed to process fill: {}", e);
+            }
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+```
+
+### Custom Error Creation
+
+```rust
+impl RiskManager {
+    fn check_order(&self, order: &Order, position: i64) -> Result<()> {
+        // Check order size
+        if order.quantity.value() > self.max_order_size {
+            return Err(Error::RiskLimitExceeded(
+                format!(
+                    "Order size {} exceeds maximum {}",
+                    order.quantity.value(),
+                    self.max_order_size
+                )
+            ));
+        }
+        
+        // Check resulting position
+        let new_position = position + 
+            (order.quantity.as_i64() * order.side.sign());
+        
+        if new_position.abs() > self.max_position {
+            return Err(Error::RiskLimitExceeded(
+                format!(
+                    "Resulting position {} would exceed maximum {}",
+                    new_position.abs(),
+                    self.max_position
+                )
+            ));
+        }
+        
+        Ok(())
+    }
+}
+```
+
+## Best Practices
+
+### 1. Use Descriptive Error Messages
+
+```rust
+// Good
+Err(Error::InvalidPrice(
+    format!("price {} exceeds maximum {}", price, MAX_PRICE)
+))
+
+// Bad
+Err(Error::InvalidPrice("invalid".to_string()))
+```
+
+### 2. Include Context
+
+```rust
+// Good
+Err(Error::OrderNotFound(
+    format!("order {} not found in active orders", order_id)
+))
+
+// Better - but OrderNotFound already takes u64
+Err(Error::OrderNotFound(order_id.value()))
+```
+
+### 3. Handle Errors Appropriately
+
+```rust
+// Don't ignore errors
+let _ = submit_order(order);  // Bad!
+
+// Handle or propagate
+submit_order(order)?;  // Propagate
+
+// Or handle explicitly
+if let Err(e) = submit_order(order) {
+    log::error!("Failed to submit: {}", e);
+    return Err(e);
+}
+```
+
+### 4. Log Before Returning
+
+```rust
+fn critical_operation() -> Result<()> {
+    if let Err(e) = risky_operation() {
+        error!("Critical operation failed: {}", e);
+        return Err(e);
+    }
+    Ok(())
+}
+```
+
+### 5. Use Result Type Consistently
+
+```rust
+// Good - consistent use of Result
+fn validate_order(order: &Order) -> Result<()> { ... }
+fn submit_order(order: Order) -> Result<OrderId> { ... }
+
+// Avoid mixing Option and Result without good reason
+```

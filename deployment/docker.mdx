@@ -1,0 +1,317 @@
+---
+title: Docker Deployment
+description: Deploy NanoARB using Docker containers for isolated and reproducible environments
+icon: docker
+---
+
+## Overview
+
+NanoARB provides Docker configurations for both development and production deployments. The multi-stage Dockerfile is optimized for minimal latency and small image size, critical for high-frequency trading applications.
+
+## Container Architecture
+
+The deployment uses a multi-stage build process:
+
+### Stage 1: Build Environment
+
+Builds the Rust application with all necessary dependencies:
+
+```dockerfile
+FROM rust:1.84-bookworm AS builder
+```
+
+Key optimizations:
+- **Dependency caching**: Copies `Cargo.toml` files first to cache dependency builds
+- **Release build**: Compiles with `--release` flag for maximum performance
+- **Binary stripping**: Removes debug symbols to reduce image size
+
+### Stage 2: Runtime Environment
+
+Creates a minimal runtime container:
+
+```dockerfile
+FROM debian:bookworm-slim AS runtime
+```
+
+Security features:
+- Runs as non-root user (`nanoarb`)
+- Only includes runtime dependencies (`ca-certificates`, `libssl3`)
+- Health check endpoint configured
+
+## Docker Compose Configurations
+
+### Full Stack Deployment
+
+The `docker-compose.yml` file deploys the complete stack including monitoring:
+
+```yaml
+services:
+  nanoarb:      # Trading engine
+  prometheus:   # Metrics collection
+  grafana:      # Visualization dashboards
+```
+
+**Key configuration details:**
+
+<CodeGroup>
+```yaml docker-compose.yml
+services:
+  nanoarb:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: nanoarb-engine
+    restart: unless-stopped
+    ports:
+      - "9090:9090"  # Metrics endpoint
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - nanoarb-data:/app/data
+      - nanoarb-logs:/app/logs
+      - ../models:/app/models:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+```
+</CodeGroup>
+
+Resource limits:
+- **CPU**: 2-4 cores reserved for consistent performance
+- **Memory**: 2-4GB allocated for order book and strategy state
+
+### Monitoring-Only Stack
+
+For local development, use `docker-compose-monitoring.yml` to run only Prometheus and Grafana while running the trading engine natively:
+
+```bash
+docker compose -f docker/docker-compose-monitoring.yml up -d
+```
+
+This configuration:
+- Runs Prometheus on port 9091
+- Runs Grafana on port 3000
+- Scrapes metrics from host machine via `host.docker.internal:9090`
+
+## Setup Commands
+
+### Building the Image
+
+```bash
+# Build from source root
+docker build -f docker/Dockerfile -t nanoarb:latest .
+```
+
+Build takes approximately 5-10 minutes on first run due to Rust dependency compilation. Subsequent builds leverage Docker layer caching.
+
+### Starting the Stack
+
+<Tabs>
+  <Tab title="Full Stack">
+    ```bash
+    cd docker
+    docker compose up -d
+    ```
+    
+    Starts all services in detached mode.
+  </Tab>
+  
+  <Tab title="Monitoring Only">
+    ```bash
+    cd docker
+    docker compose -f docker-compose-monitoring.yml up -d
+    ```
+    
+    Run the trading engine locally:
+    ```bash
+    cargo run --release --bin nanoarb -- --config config.toml
+    ```
+  </Tab>
+</Tabs>
+
+### Viewing Logs
+
+```bash
+# View engine logs
+docker compose logs -f nanoarb
+
+# View all logs
+docker compose logs -f
+```
+
+### Checking Status
+
+```bash
+# Check container health
+docker compose ps
+
+# Check metrics endpoint
+curl http://localhost:9090/metrics
+
+# Check health endpoint
+curl http://localhost:9090/health
+```
+
+## Teardown Commands
+
+### Stop Services
+
+```bash
+# Stop all containers
+docker compose down
+
+# Stop and remove volumes (caution: deletes data)
+docker compose down -v
+```
+
+### Clean Up
+
+```bash
+# Remove dangling images
+docker image prune
+
+# Full cleanup (removes all unused containers, networks, images)
+docker system prune -a
+```
+
+## Volume Management
+
+The deployment creates persistent volumes:
+
+| Volume | Purpose | Location |
+|--------|---------|----------|
+| `nanoarb-data` | Market data and state | `/app/data` |
+| `nanoarb-logs` | Application logs | `/app/logs` |
+| `prometheus-data` | Metrics time-series | `/prometheus` |
+| `grafana-data` | Dashboard configs | `/var/lib/grafana` |
+
+### Backup Volumes
+
+```bash
+# Backup data volume
+docker run --rm -v nanoarb-data:/data -v $(pwd):/backup \
+  alpine tar czf /backup/nanoarb-data.tar.gz -C /data .
+```
+
+### Restore Volumes
+
+```bash
+# Restore data volume
+docker run --rm -v nanoarb-data:/data -v $(pwd):/backup \
+  alpine tar xzf /backup/nanoarb-data.tar.gz -C /data
+```
+
+## Configuration
+
+The default configuration is mounted from `docker/config.toml`:
+
+```toml
+name = "nanoarb"
+log_level = "info"
+metrics_port = 9090
+data_dir = "/app/data"
+
+[trading]
+live_enabled = false
+symbols = ["ESH24"]
+initial_capital = 1000000.0
+max_position = 50
+max_order_size = 10
+```
+
+**Configuration override:**
+
+```bash
+# Use custom config
+docker compose run -v ./my-config.toml:/app/config.toml nanoarb
+```
+
+## Environment Variables
+
+The container accepts these environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `RUST_BACKTRACE` | `1` | Enable stack traces on errors |
+| `PORT` | `9090` | Metrics server port |
+| `NANOARB_CONFIG` | `/app/config.toml` | Configuration file path |
+
+## Networking
+
+All services communicate via the `nanoarb-network` bridge network:
+
+- **nanoarb**: Exposes port 9090 for metrics
+- **prometheus**: Exposes port 9091 (mapped from 9090)
+- **grafana**: Exposes port 3000 for dashboards
+
+<Note>
+  Prometheus scrapes the trading engine at `nanoarb:9090` when using the full stack, or `host.docker.internal:9090` in monitoring-only mode.
+</Note>
+
+## Health Checks
+
+The trading engine includes a health check that runs every 30 seconds:
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-9090}/health || exit 1
+```
+
+View health status:
+```bash
+docker inspect --format='{{.State.Health.Status}}' nanoarb-engine
+```
+
+## Troubleshooting
+
+### Container Won't Start
+
+```bash
+# Check logs
+docker compose logs nanoarb
+
+# Check container status
+docker compose ps
+
+# Inspect container
+docker inspect nanoarb-engine
+```
+
+### Port Conflicts
+
+If ports are already in use, modify the port mappings in `docker-compose.yml`:
+
+```yaml
+ports:
+  - "9091:9090"  # Change host port to 9091
+```
+
+### Memory Issues
+
+Adjust memory limits if the container is killed:
+
+```yaml
+deploy:
+  resources:
+    limits:
+      memory: 8G  # Increase limit
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/deployment/monitoring">
+    Configure Prometheus and Grafana dashboards
+  </Card>
+  <Card title="Production" icon="rocket" href="/deployment/production">
+    Production deployment best practices
+  </Card>
+</CardGroup>

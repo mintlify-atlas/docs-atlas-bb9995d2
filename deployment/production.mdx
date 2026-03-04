@@ -1,0 +1,645 @@
+---
+title: Production Deployment
+description: Best practices for deploying NanoARB in production high-frequency trading environments
+icon: rocket
+---
+
+## Overview
+
+Deploying a high-frequency trading system requires careful attention to latency optimization, risk management, and operational reliability. This guide covers production deployment best practices for NanoARB.
+
+<Warning>
+  Production trading involves real financial risk. Always test thoroughly in simulation before deploying live capital.
+</Warning>
+
+## Pre-Production Checklist
+
+Before going live:
+
+<Steps>
+  <Step title="Backtest Validation">
+    - Run extensive backtests on historical data
+    - Validate Sharpe ratio >2.0 on out-of-sample data
+    - Ensure consistent performance across market conditions
+  </Step>
+  
+  <Step title="Paper Trading">
+    - Run strategy in paper trading mode for 1-2 weeks
+    - Monitor execution quality and slippage
+    - Verify fill ratios match backtest assumptions
+  </Step>
+  
+  <Step title="Risk Framework">
+    - Configure kill switches and position limits
+    - Set up alerting for risk breaches
+    - Document manual intervention procedures
+  </Step>
+  
+  <Step title="Infrastructure">
+    - Deploy in co-location facility
+    - Configure CPU pinning and kernel optimizations
+    - Set up monitoring and logging
+  </Step>
+  
+  <Step title="Compliance">
+    - Ensure regulatory compliance (if applicable)
+    - Configure audit logging
+    - Review market access agreements
+  </Step>
+</Steps>
+
+## Hardware Requirements
+
+### Recommended Specifications
+
+For production HFT deployment:
+
+<CardGroup cols={2}>
+  <Card title="CPU" icon="microchip">
+    - Intel Xeon or AMD EPYC
+    - 8+ cores @ 3.0GHz+
+    - Isolated cores for trading process
+  </Card>
+  
+  <Card title="Memory" icon="memory">
+    - 32GB+ DDR4/DDR5
+    - ECC memory recommended
+    - Low CAS latency
+  </Card>
+  
+  <Card title="Storage" icon="hard-drive">
+    - NVMe SSD for market data
+    - RAID 1 for redundancy
+    - 500GB+ capacity
+  </Card>
+  
+  <Card title="Network" icon="network-wired">
+    - 10Gbps+ NIC
+    - Kernel bypass (DPDK) support
+    - Direct exchange connectivity
+  </Card>
+</CardGroup>
+
+### Co-Location
+
+For optimal latency:
+- **CME Aurora**: &lt;500ns median latency to CME matching engine
+- **Equinix NY4/LD4**: Low-latency access to US/European exchanges
+- **Direct connections**: Avoid intermediate network hops
+
+## Latency Optimization
+
+### Operating System Tuning
+
+<CodeGroup>
+```bash CPU Pinning
+# Pin trading process to isolated CPU cores
+taskset -c 0-3 ./nanoarb --config config.toml
+
+# Isolate cores at boot (add to kernel boot params)
+isolcpus=0-3 nohz_full=0-3 rcu_nocbs=0-3
+```
+
+```bash Huge Pages
+# Enable huge pages for reduced TLB misses
+echo 1024 > /proc/sys/vm/nr_hugepages
+
+# Configure in sysctl
+vm.nr_hugepages = 1024
+vm.hugetlb_shm_group = 1000
+```
+
+```bash IRQ Affinity
+# Move network IRQs to separate cores
+echo 4-7 > /proc/irq/<IRQ_NUM>/smp_affinity_list
+
+# Or use irqbalance daemon
+systemctl enable irqbalance
+```
+
+```bash Governor Settings
+# Set CPU to performance mode
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    echo performance > $gov
+done
+
+# Disable C-states for lower wake latency
+for state in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
+    echo 1 > $state
+done
+```
+</CodeGroup>
+
+### Network Optimization
+
+```bash
+# Increase network buffer sizes
+sysctl -w net.core.rmem_max=134217728
+sysctl -w net.core.wmem_max=134217728
+sysctl -w net.ipv4.tcp_rmem="4096 87380 67108864"
+sysctl -w net.ipv4.tcp_wmem="4096 65536 67108864"
+
+# Disable TCP timestamps and selective ACK
+sysctl -w net.ipv4.tcp_timestamps=0
+sysctl -w net.ipv4.tcp_sack=0
+
+# Enable TCP fast open
+sysctl -w net.ipv4.tcp_fastopen=3
+```
+
+### Application-Level Optimization
+
+<Tabs>
+  <Tab title="Build Configuration">
+    Build with aggressive optimizations:
+    
+    ```toml
+    # Cargo.toml
+    [profile.release]
+    opt-level = 3
+    lto = "fat"              # Link-time optimization
+    codegen-units = 1        # Better optimization
+    panic = "abort"          # Faster unwinding
+    strip = true             # Remove debug symbols
+    
+    [profile.release.build-override]
+    opt-level = 3
+    ```
+  </Tab>
+  
+  <Tab title="Runtime Configuration">
+    Configure runtime environment:
+    
+    ```bash
+    # Use jemalloc for better allocation performance
+    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so
+    
+    # Set thread priority
+    nice -n -20 ./nanoarb --config config.toml
+    
+    # Disable address space randomization
+    setarch $(uname -m) -R ./nanoarb --config config.toml
+    ```
+  </Tab>
+  
+  <Tab title="Model Optimization">
+    Optimize ML inference:
+    
+    - Use ONNX Runtime with optimizations enabled
+    - Quantize model weights (FP16 or INT8)
+    - Batch predictions when possible
+    - Profile inference path with `perf`
+    
+    Target: &lt;500ns p99 inference latency
+  </Tab>
+</Tabs>
+
+## Risk Management
+
+NanoARB includes comprehensive risk management in `crates/nano-backtest/src/risk.rs`:
+
+### Configuration
+
+The `RiskConfig` structure defines risk parameters:
+
+```rust
+pub struct RiskConfig {
+    /// Maximum position size (contracts)
+    pub max_position: i64,
+    
+    /// Maximum single order size
+    pub max_order_size: u32,
+    
+    /// Maximum drawdown percentage before kill switch
+    pub max_drawdown_pct: f64,
+    
+    /// Maximum daily loss before stop
+    pub max_daily_loss: f64,
+    
+    /// Maximum number of open orders
+    pub max_open_orders: usize,
+    
+    /// Enable kill switch
+    pub enable_kill_switch: bool,
+}
+```
+
+### Production Risk Settings
+
+<Tabs>
+  <Tab title="Conservative">
+    ```toml
+    [risk]
+    max_position = 20
+    max_order_size = 5
+    max_drawdown_pct = 0.02      # 2% max drawdown
+    max_daily_loss = 10000.0     # $10k daily loss limit
+    max_open_orders = 10
+    enable_kill_switch = true
+    ```
+    
+    Use for initial production deployment or volatile markets.
+  </Tab>
+  
+  <Tab title="Moderate">
+    ```toml
+    [risk]
+    max_position = 50
+    max_order_size = 10
+    max_drawdown_pct = 0.05      # 5% max drawdown
+    max_daily_loss = 50000.0     # $50k daily loss limit
+    max_open_orders = 20
+    enable_kill_switch = true
+    ```
+    
+    Balanced risk for established strategies.
+  </Tab>
+  
+  <Tab title="Aggressive">
+    ```toml
+    [risk]
+    max_position = 100
+    max_order_size = 20
+    max_drawdown_pct = 0.10      # 10% max drawdown
+    max_daily_loss = 100000.0    # $100k daily loss limit
+    max_open_orders = 50
+    enable_kill_switch = true
+    ```
+    
+    <Warning>
+      Only use aggressive settings with proven strategies and ample capital.
+    </Warning>
+  </Tab>
+</Tabs>
+
+### Kill Switch Mechanism
+
+The kill switch automatically stops trading when risk limits are breached:
+
+```rust
+// From crates/nano-backtest/src/risk.rs:137-157
+pub fn update_pnl(&mut self, current_pnl: f64, position: i64) -> bool {
+    // Update peak
+    if current_pnl > self.peak_pnl {
+        self.peak_pnl = current_pnl;
+    }
+
+    // Check if kill switch should activate
+    if self.config.enable_kill_switch && !self.kill_switch_active {
+        // Drawdown check
+        if self.peak_pnl > 0.0 {
+            let drawdown = (self.peak_pnl - current_pnl) / self.peak_pnl;
+            if drawdown > self.config.max_drawdown_pct {
+                self.kill_switch_active = true;
+                self.breach_count += 1;
+                return true;
+            }
+        }
+        
+        // Daily loss check
+        let daily_pnl = current_pnl - self.daily_start_pnl;
+        if daily_pnl < -self.config.max_daily_loss {
+            self.kill_switch_active = true;
+            return true;
+        }
+    }
+    false
+}
+```
+
+**Kill switch triggers:**
+1. **Drawdown breach**: P&L falls below threshold from peak
+2. **Daily loss limit**: Intraday loss exceeds configured limit
+3. **Position breach**: Position exceeds maximum (checked separately)
+
+<Note>
+  When the kill switch activates, the system stops submitting new orders but continues to manage existing positions.
+</Note>
+
+### Manual Override
+
+Manually control the kill switch:
+
+```rust
+// Activate kill switch
+risk_manager.activate_kill_switch();
+
+// Reset after investigation
+risk_manager.reset_kill_switch();
+
+// Check status
+if risk_manager.is_kill_switch_active() {
+    // Handle kill switch state
+}
+```
+
+## Configuration Management
+
+### Production Config Structure
+
+```toml
+# config.toml
+name = "nanoarb-prod"
+log_level = "info"              # Avoid 'debug' in production
+metrics_port = 9090
+data_dir = "/mnt/data/nanoarb"
+model_path = "/mnt/models/strategy_v1.onnx"
+
+[trading]
+live_enabled = true             # ENABLE LIVE TRADING
+symbols = ["ESH25", "NQH25"]   # E-mini S&P 500, Nasdaq
+initial_capital = 1000000.0
+max_position = 50
+max_order_size = 10
+
+[latency]
+order_latency_ns = 100000       # 100μs target
+market_data_latency_ns = 50000  # 50μs market data
+ack_latency_ns = 120000
+jitter_ns = 10000
+use_random_jitter = true
+
+[fees]
+maker_fee = -0.25               # CME maker rebate
+taker_fee = 1.18                # CME taker fee
+exchange_fee = 0.12
+clearing_fee = 0.02
+
+[risk]
+max_position = 50
+max_order_size = 10
+max_drawdown_pct = 0.05         # 5% kill switch
+max_daily_loss = 50000.0
+max_open_orders = 20
+enable_kill_switch = true
+
+[execution]
+track_queue_position = true
+fill_probability_decay = 0.9
+partial_fill_probability = 0.2
+simulate_adverse_selection = true
+
+[output]
+verbosity = 1
+record_fills = true
+record_orders = true
+record_tick_pnl = false         # Disable to reduce logging overhead
+```
+
+### Environment-Specific Configs
+
+Maintain separate configs for each environment:
+
+```
+configs/
+├── config.dev.toml       # Local development
+├── config.staging.toml   # Paper trading
+└── config.prod.toml      # Production
+```
+
+Load based on environment:
+
+```bash
+export NANOARB_ENV=prod
+./nanoarb --config configs/config.$NANOARB_ENV.toml
+```
+
+## Monitoring & Alerting
+
+### Critical Alerts
+
+Set up alerts for critical events:
+
+<AccordionGroup>
+  <Accordion title="Kill Switch Activation">
+    Alert immediately when kill switch triggers:
+    
+    ```yaml
+    # Grafana alert rule
+    - alert: KillSwitchActive
+      expr: nanoarb_kill_switch_active == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Kill switch activated - trading halted"
+    ```
+  </Accordion>
+  
+  <Accordion title="High Latency">
+    Alert when latency degrades:
+    
+    ```yaml
+    - alert: HighInferenceLatency
+      expr: |
+        histogram_quantile(0.99, 
+          sum(rate(nanoarb_inference_latency_ns_bucket[1m])) by (le)
+        ) > 10000  # 10μs
+      for: 1m
+      labels:
+        severity: warning
+    ```
+  </Accordion>
+  
+  <Accordion title="Position Limit">
+    Alert when approaching position limits:
+    
+    ```yaml
+    - alert: PositionLimitApproaching
+      expr: abs(nanoarb_position) > 40  # 80% of max_position=50
+      for: 5m
+      labels:
+        severity: warning
+    ```
+  </Accordion>
+  
+  <Accordion title="Daily Loss">
+    Alert on significant daily losses:
+    
+    ```yaml
+    - alert: DailyLossThreshold
+      expr: |
+        (nanoarb_pnl - nanoarb_pnl offset 24h) < -25000
+      labels:
+        severity: critical
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Health Monitoring
+
+```bash
+# Set up systemd service for auto-restart
+[Unit]
+Description=NanoARB Trading Engine
+After=network.target
+
+[Service]
+Type=simple
+User=trading
+ExecStart=/opt/nanoarb/nanoarb --config /etc/nanoarb/config.toml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Logging
+
+### Production Logging
+
+Configure structured logging:
+
+```rust
+// Use env_logger or tracing for structured logs
+RUST_LOG=nanoarb=info,nano_gateway=debug
+```
+
+**Log rotation:**
+
+```bash
+# /etc/logrotate.d/nanoarb
+/var/log/nanoarb/*.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 0640 trading trading
+    sharedscripts
+    postrotate
+        systemctl reload nanoarb
+    endscript
+}
+```
+
+### Audit Trail
+
+Maintain audit logs for:
+- All order submissions and cancellations
+- Fill executions with timestamps
+- Risk limit breaches
+- Configuration changes
+- Manual interventions
+
+## Disaster Recovery
+
+### Backup Strategy
+
+```bash
+#!/bin/bash
+# backup.sh - Daily backup of critical data
+
+BACKUP_DIR="/mnt/backups/$(date +%Y%m%d)"
+mkdir -p $BACKUP_DIR
+
+# Backup configuration
+cp /etc/nanoarb/config.toml $BACKUP_DIR/
+
+# Backup position state
+cp /mnt/data/nanoarb/positions.db $BACKUP_DIR/
+
+# Backup logs
+tar czf $BACKUP_DIR/logs.tar.gz /var/log/nanoarb/
+
+# Upload to S3
+aws s3 sync $BACKUP_DIR s3://nanoarb-backups/$(date +%Y%m%d)/
+```
+
+### Failover Procedures
+
+<Steps>
+  <Step title="Detect Failure">
+    Monitor health check endpoint and system metrics
+  </Step>
+  
+  <Step title="Halt Trading">
+    Immediately stop new order submissions
+  </Step>
+  
+  <Step title="Flatten Positions">
+    Submit market orders to close all open positions
+  </Step>
+  
+  <Step title="Investigate">
+    Review logs and metrics to determine root cause
+  </Step>
+  
+  <Step title="Restore Service">
+    Deploy fix and resume trading after validation
+  </Step>
+</Steps>
+
+## Compliance & Audit
+
+### Regulatory Considerations
+
+Depending on jurisdiction:
+- **MiFID II** (EU): Transaction reporting, best execution
+- **Reg NMS** (US): Order protection, access rules
+- **Market Maker Obligations**: Quote obligations, spread requirements
+
+### Audit Logging
+
+Ensure all trades are logged with:
+- Timestamp (nanosecond precision)
+- Order ID and exchange ID
+- Symbol, side, quantity, price
+- Fill details (maker/taker, fees)
+- Strategy version and parameters
+
+```rust
+// Example audit log entry
+{
+    "timestamp": 1677649200123456789,
+    "order_id": "ORD-12345",
+    "symbol": "ESH25",
+    "side": "Buy",
+    "quantity": 5,
+    "price": 5000.25,
+    "fill_price": 5000.25,
+    "is_maker": true,
+    "fee": -1.25,
+    "strategy": "momentum_v1"
+}
+```
+
+## Best Practices Summary
+
+<CardGroup cols={2}>
+  <Card title="Test Extensively" icon="flask">
+    - Backtest on 2+ years of data
+    - Paper trade for weeks before live
+    - Validate across market conditions
+  </Card>
+  
+  <Card title="Optimize Latency" icon="bolt">
+    - Co-locate at exchange
+    - Pin CPUs and isolate cores
+    - Target &lt;100μs order latency
+  </Card>
+  
+  <Card title="Manage Risk" icon="shield">
+    - Enable kill switches
+    - Set conservative initial limits
+    - Monitor drawdown continuously
+  </Card>
+  
+  <Card title="Monitor Everything" icon="chart-line">
+    - Real-time dashboards
+    - Critical alerts
+    - Comprehensive logging
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker" icon="docker" href="/deployment/docker">
+    Container deployment guide
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/deployment/monitoring">
+    Metrics and alerting setup
+  </Card>
+</CardGroup>

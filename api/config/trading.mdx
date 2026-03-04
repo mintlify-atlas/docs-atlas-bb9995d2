@@ -1,0 +1,389 @@
+---
+title: "TradingConfig"
+description: "Trading configuration for live and paper trading"
+---
+
+## Overview
+
+The `TradingConfig` struct defines configuration parameters for trading operations, including instrument selection, position limits, and capital allocation.
+
+Source: `nano-gateway/src/config.rs`
+
+## TradingConfig
+
+```rust
+pub struct TradingConfig {
+    pub live_enabled: bool,
+    pub symbols: Vec<String>,
+    pub initial_capital: f64,
+    pub max_position: i64,
+    pub max_order_size: u32,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `live_enabled` | `bool` | `false` | Enable live trading (vs paper trading) |
+| `symbols` | `Vec<String>` | `["ESH24"]` | Instrument symbols to trade |
+| `initial_capital` | `f64` | 1,000,000.0 | Starting capital in dollars |
+| `max_position` | `i64` | 50 | Maximum net position per instrument |
+| `max_order_size` | `u32` | 10 | Maximum single order size |
+
+## Constructor
+
+### `default`
+
+Creates a default trading configuration suitable for paper trading.
+
+```rust
+impl Default for TradingConfig
+```
+
+**Defaults:**
+- Paper trading mode (`live_enabled: false`)
+- Single ES future contract (`ESH24`)
+- $1M initial capital
+- Conservative position limits (50 contracts max)
+- Order size limit of 10 contracts
+
+**Example:**
+```rust
+use nano_gateway::config::TradingConfig;
+
+let config = TradingConfig::default();
+assert_eq!(config.live_enabled, false);
+assert_eq!(config.max_position, 50);
+```
+
+## Configuration Examples
+
+### Paper Trading Configuration
+
+Safe configuration for testing strategies without real money.
+
+```rust
+use nano_gateway::config::TradingConfig;
+
+let paper_config = TradingConfig {
+    live_enabled: false,
+    symbols: vec![
+        "ESH24".to_string(),
+        "NQH24".to_string(),
+    ],
+    initial_capital: 100_000.0,
+    max_position: 20,
+    max_order_size: 5,
+};
+```
+
+### Live Trading Configuration
+
+Configuration for live trading with real capital.
+
+```rust
+let live_config = TradingConfig {
+    live_enabled: true,
+    symbols: vec!["ESH24".to_string()],
+    initial_capital: 500_000.0,
+    max_position: 10,  // Conservative for live
+    max_order_size: 2,  // Small orders for live
+};
+```
+
+**Warning:** Always start with small position limits when going live.
+
+### Multi-Instrument Configuration
+
+Trading multiple instruments simultaneously.
+
+```rust
+let multi_config = TradingConfig {
+    live_enabled: false,
+    symbols: vec![
+        "ESH24".to_string(),  // S&P 500 E-mini
+        "NQH24".to_string(),  // Nasdaq 100 E-mini
+        "YMH24".to_string(),  // Dow E-mini
+        "RTYM24".to_string(), // Russell 2000 E-mini
+    ],
+    initial_capital: 2_000_000.0,
+    max_position: 50,  // Per instrument
+    max_order_size: 10,
+};
+```
+
+### HFT Configuration
+
+Optimized for high-frequency trading.
+
+```rust
+let hft_config = TradingConfig {
+    live_enabled: true,
+    symbols: vec!["ESH24".to_string()],
+    initial_capital: 1_000_000.0,
+    max_position: 100,
+    max_order_size: 20,  // Larger orders for HFT
+};
+```
+
+## Field Details
+
+### live_enabled
+
+Controls whether orders are sent to live exchange or simulated.
+
+**Values:**
+- `false` (default): Paper trading mode - no real orders sent
+- `true`: Live trading mode - orders sent to exchange
+
+**Safety:** Always test strategies thoroughly in paper mode before enabling live trading.
+
+**Example:**
+```rust
+if config.live_enabled {
+    println!("WARNING: Live trading is ENABLED");
+    // Additional confirmation required
+} else {
+    println!("Paper trading mode - safe to test");
+}
+```
+
+### symbols
+
+List of instrument symbols to trade.
+
+**Format:** CME symbol format (e.g., "ESH24" = ES March 2024 contract)
+
+**Common Symbols:**
+- `ESH24`, `ESM24`, `ESU24`, `ESZ24`: S&P 500 E-mini futures (H=Mar, M=Jun, U=Sep, Z=Dec)
+- `NQH24`, `NQM24`, etc.: Nasdaq 100 E-mini futures
+- `YMH24`, `YMM24`, etc.: Dow E-mini futures
+- `RTYM24`, `RTYU24`, etc.: Russell 2000 E-mini futures
+
+**Example:**
+```rust
+let config = TradingConfig {
+    symbols: vec![
+        "ESM24".to_string(),  // ES June 2024
+        "ESU24".to_string(),  // ES September 2024
+    ],
+    ..Default::default()
+};
+
+// Access symbols
+for symbol in &config.symbols {
+    println!("Trading: {}", symbol);
+}
+```
+
+### initial_capital
+
+Starting capital available for trading.
+
+**Units:** US Dollars
+
+**Usage:**
+- Position sizing calculations
+- Risk management (percentage of capital)
+- Performance reporting (returns)
+
+**Example:**
+```rust
+let capital = config.initial_capital;
+let risk_per_trade = capital * 0.01;  // 1% risk per trade
+
+println!("Trading with ${:.2}", capital);
+println!("Max risk per trade: ${:.2}", risk_per_trade);
+```
+
+### max_position
+
+Maximum net position size per instrument.
+
+**Units:** Contracts (can be positive or negative)
+
+**Range:** Symmetric around zero (e.g., max_position=50 means -50 to +50)
+
+**Enforcement:** Checked before order submission by risk manager
+
+**Example:**
+```rust
+let config = TradingConfig {
+    max_position: 50,
+    ..Default::default()
+};
+
+// Check if order would exceed limit
+let current_position = 45;
+let order_size = 10;
+
+if current_position + order_size > config.max_position {
+    println!("Order would exceed max position limit");
+}
+```
+
+**Typical Values:**
+- Conservative: 10-20 contracts
+- Moderate: 50-100 contracts
+- Aggressive: 100-500 contracts
+
+### max_order_size
+
+Maximum size for a single order.
+
+**Units:** Contracts
+
+**Purpose:**
+- Prevents accidental large orders
+- Manages market impact
+- Controls execution risk
+
+**Example:**
+```rust
+let config = TradingConfig {
+    max_order_size: 10,
+    ..Default::default()
+};
+
+// Split large orders if needed
+let desired_size = 25;
+let num_orders = (desired_size + config.max_order_size - 1) / config.max_order_size;
+
+println!("Split into {} orders of {} contracts", 
+    num_orders, config.max_order_size);
+```
+
+**Typical Values:**
+- Retail: 1-5 contracts
+- Small firm: 5-20 contracts
+- HFT: 20-100 contracts
+
+## AppConfig Integration
+
+`TradingConfig` is typically embedded in the larger `AppConfig` structure.
+
+```rust
+pub struct AppConfig {
+    pub name: String,
+    pub log_level: String,
+    pub metrics_port: u16,
+    pub data_dir: PathBuf,
+    pub model_path: Option<PathBuf>,
+    pub trading: TradingConfig,
+}
+```
+
+### Loading Configuration
+
+#### From File
+
+```rust
+use nano_gateway::config::AppConfig;
+
+let config = AppConfig::load("config.toml")?;
+let trading = &config.trading;
+
+println!("Live trading: {}", trading.live_enabled);
+```
+
+#### From Environment
+
+```rust
+let config = AppConfig::from_env()?;
+```
+
+Reads from `NANOARB_CONFIG` environment variable or uses defaults.
+
+#### Example TOML Config
+
+```toml
+name = "nanoarb"
+log_level = "info"
+metrics_port = 9090
+data_dir = "data"
+
+[trading]
+live_enabled = false
+symbols = ["ESH24", "NQH24"]
+initial_capital = 1000000.0
+max_position = 50
+max_order_size = 10
+```
+
+## Validation
+
+Always validate configuration before use:
+
+```rust
+fn validate_trading_config(config: &TradingConfig) -> Result<(), String> {
+    if config.initial_capital <= 0.0 {
+        return Err("Initial capital must be positive".to_string());
+    }
+    
+    if config.max_position <= 0 {
+        return Err("Max position must be positive".to_string());
+    }
+    
+    if config.max_order_size == 0 {
+        return Err("Max order size must be positive".to_string());
+    }
+    
+    if config.max_order_size > config.max_position as u32 {
+        return Err("Max order size cannot exceed max position".to_string());
+    }
+    
+    if config.symbols.is_empty() {
+        return Err("At least one symbol required".to_string());
+    }
+    
+    if config.live_enabled {
+        println!("WARNING: Live trading enabled - proceed with caution");
+    }
+    
+    Ok(())
+}
+```
+
+## Complete Example
+
+```rust
+use nano_gateway::config::{AppConfig, TradingConfig};
+
+// Create custom trading configuration
+let trading_config = TradingConfig {
+    live_enabled: false,
+    symbols: vec![
+        "ESH24".to_string(),
+        "NQH24".to_string(),
+    ],
+    initial_capital: 500_000.0,
+    max_position: 30,
+    max_order_size: 5,
+};
+
+// Validate configuration
+validate_trading_config(&trading_config)
+    .expect("Invalid trading configuration");
+
+// Create full app config
+let mut app_config = AppConfig::default();
+app_config.trading = trading_config;
+
+// Save to file
+app_config.save("my_config.toml")?;
+
+// Use in trading system
+println!("Trading configuration:");
+println!("  Mode: {}", 
+    if app_config.trading.live_enabled { "LIVE" } else { "PAPER" });
+println!("  Symbols: {:?}", app_config.trading.symbols);
+println!("  Capital: ${:.2}", app_config.trading.initial_capital);
+println!("  Max Position: {}", app_config.trading.max_position);
+println!("  Max Order Size: {}", app_config.trading.max_order_size);
+```
+
+## See Also
+
+- [RiskConfig](/api/config/risk) - Risk management configuration
+- [BacktestConfig](/api/backtest/config) - Backtest configuration

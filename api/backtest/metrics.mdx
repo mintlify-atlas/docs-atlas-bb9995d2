@@ -1,0 +1,461 @@
+---
+title: "Performance Metrics"
+description: "Performance metrics and statistics for backtest analysis"
+---
+
+## Overview
+
+The metrics module provides comprehensive performance tracking for backtests, including P&L metrics, trade statistics, drawdown analysis, and risk-adjusted returns.
+
+Source: `nano-backtest/src/metrics.rs`
+
+## BacktestMetrics
+
+Core performance metrics collected during backtest execution.
+
+```rust
+pub struct BacktestMetrics {
+    pub total_pnl: f64,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub total_fees: f64,
+    pub num_trades: u32,
+    pub winning_trades: u32,
+    pub losing_trades: u32,
+    pub gross_profit: f64,
+    pub gross_loss: f64,
+    pub max_drawdown_pct: f64,
+    pub max_drawdown_abs: f64,
+    pub peak_pnl: f64,
+    pub total_volume: u64,
+    pub buy_fills: u32,
+    pub sell_fills: u32,
+    pub maker_fills: u32,
+    pub taker_fills: u32,
+    pub avg_fill_latency_ns: f64,
+    pub start_time: Option<Timestamp>,
+    pub end_time: Option<Timestamp>,
+}
+```
+
+### Key Metrics
+
+#### P&L Metrics
+
+| Field | Description |
+|-------|-------------|
+| `total_pnl` | Total P&L (realized + unrealized) |
+| `realized_pnl` | P&L from closed positions |
+| `unrealized_pnl` | P&L from open positions |
+| `total_fees` | Total fees paid |
+
+#### Trade Statistics
+
+| Field | Description |
+|-------|-------------|
+| `num_trades` | Total number of round-trip trades |
+| `winning_trades` | Number of profitable trades |
+| `losing_trades` | Number of losing trades |
+| `gross_profit` | Sum of all winning trade P&Ls |
+| `gross_loss` | Sum of all losing trade P&Ls (absolute) |
+
+#### Volume Statistics
+
+| Field | Description |
+|-------|-------------|
+| `total_volume` | Total contracts traded |
+| `buy_fills` | Number of buy-side fills |
+| `sell_fills` | Number of sell-side fills |
+| `maker_fills` | Number of maker fills (liquidity providing) |
+| `taker_fills` | Number of taker fills (liquidity taking) |
+
+#### Drawdown Metrics
+
+| Field | Description |
+|-------|-------------|
+| `max_drawdown_pct` | Maximum drawdown as percentage of peak |
+| `max_drawdown_abs` | Maximum drawdown in absolute dollars |
+| `peak_pnl` | Highest P&L reached during backtest |
+
+### Constructor
+
+#### `new`
+
+Creates a new empty metrics instance.
+
+```rust
+pub fn new() -> Self
+```
+
+### Calculated Metrics
+
+#### `win_rate`
+
+Calculates the win rate as a percentage.
+
+```rust
+pub fn win_rate(&self) -> f64
+```
+
+**Returns:** Win rate between 0.0 and 1.0
+
+**Formula:** `winning_trades / num_trades`
+
+**Example:**
+```rust
+let metrics = engine.metrics();
+println!("Win Rate: {:.2}%", metrics.win_rate() * 100.0);
+```
+
+#### `profit_factor`
+
+Calculates the profit factor (gross profit / gross loss).
+
+```rust
+pub fn profit_factor(&self) -> f64
+```
+
+**Returns:** Profit factor (infinity if no losing trades)
+
+**Interpretation:**
+- > 1.0: Profitable strategy
+- < 1.0: Losing strategy
+- 2.0+: Strong strategy
+
+#### `avg_trade_pnl`
+
+Calculates average P&L per trade.
+
+```rust
+pub fn avg_trade_pnl(&self) -> f64
+```
+
+#### `avg_winning_trade`
+
+Calculates average winning trade P&L.
+
+```rust
+pub fn avg_winning_trade(&self) -> f64
+```
+
+#### `avg_losing_trade`
+
+Calculates average losing trade P&L.
+
+```rust
+pub fn avg_losing_trade(&self) -> f64
+```
+
+#### `maker_ratio`
+
+Calculates the ratio of maker fills to total fills.
+
+```rust
+pub fn maker_ratio(&self) -> f64
+```
+
+**Returns:** Maker ratio between 0.0 and 1.0
+
+**Interpretation:** Higher values indicate better liquidity provision (lower fees)
+
+### Recording Methods
+
+#### `record_fill`
+
+Records a fill for metrics tracking.
+
+```rust
+pub fn record_fill(&mut self, fill: &Fill)
+```
+
+#### `record_trade`
+
+Records a completed round-trip trade.
+
+```rust
+pub fn record_trade(&mut self, pnl: f64)
+```
+
+#### `update_pnl`
+
+Updates P&L tracking and drawdown calculation.
+
+```rust
+pub fn update_pnl(&mut self, total_pnl: f64, realized: f64, unrealized: f64)
+```
+
+### Time Methods
+
+#### `duration_secs`
+
+Returns the backtest duration in seconds.
+
+```rust
+pub fn duration_secs(&self) -> f64
+```
+
+## PerformanceStats
+
+Detailed performance statistics including risk-adjusted returns.
+
+```rust
+pub struct PerformanceStats {
+    pub daily_returns: Vec<f64>,
+    pub equity_curve: Vec<f64>,
+    pub equity_timestamps: Vec<i64>,
+    pub trade_pnls: Vec<f64>,
+    pub sharpe_ratio: f64,
+    pub sortino_ratio: f64,
+    pub calmar_ratio: f64,
+    pub max_consecutive_wins: u32,
+    pub max_consecutive_losses: u32,
+    pub recovery_factor: f64,
+}
+```
+
+### Fields
+
+| Field | Description |
+|-------|-------------|
+| `daily_returns` | Daily return series |
+| `equity_curve` | Cumulative P&L over time |
+| `equity_timestamps` | Timestamps for equity curve points |
+| `trade_pnls` | P&L for each individual trade |
+| `sharpe_ratio` | Annualized Sharpe ratio |
+| `sortino_ratio` | Annualized Sortino ratio (downside-only) |
+| `calmar_ratio` | Annual return / max drawdown |
+| `max_consecutive_wins` | Longest winning streak |
+| `max_consecutive_losses` | Longest losing streak |
+| `recovery_factor` | Total return / max drawdown |
+
+### Constructor
+
+#### `new`
+
+Creates a new empty statistics instance.
+
+```rust
+pub fn new() -> Self
+```
+
+### Data Recording
+
+#### `add_equity_point`
+
+Adds a point to the equity curve.
+
+```rust
+pub fn add_equity_point(&mut self, timestamp: i64, pnl: f64)
+```
+
+#### `add_daily_return`
+
+Adds a daily return observation.
+
+```rust
+pub fn add_daily_return(&mut self, ret: f64)
+```
+
+#### `add_trade_pnl`
+
+Adds a trade P&L observation.
+
+```rust
+pub fn add_trade_pnl(&mut self, pnl: f64)
+```
+
+### Calculation
+
+#### `calculate`
+
+Calculates all statistics from recorded data.
+
+```rust
+pub fn calculate(&mut self, initial_capital: f64, max_drawdown: f64)
+```
+
+**Parameters:**
+- `initial_capital`: Starting capital for return calculations
+- `max_drawdown`: Maximum drawdown percentage from metrics
+
+**Calculates:**
+- Sharpe ratio (annualized, assuming 252 trading days)
+- Sortino ratio (using downside deviation only)
+- Calmar ratio (annual return / max drawdown)
+- Consecutive win/loss streaks
+- Recovery factor
+
+### Risk-Adjusted Returns
+
+#### Sharpe Ratio
+
+Measures excess return per unit of total volatility.
+
+**Formula:** `(mean_daily_return / std_daily_return) * sqrt(252)`
+
+**Interpretation:**
+- < 1.0: Poor risk-adjusted returns
+- 1.0-2.0: Good
+- 2.0-3.0: Very good
+- > 3.0: Excellent (rare)
+
+#### Sortino Ratio
+
+Measures excess return per unit of downside volatility (only negative returns).
+
+**Formula:** `(mean_daily_return / downside_std) * sqrt(252)`
+
+**Interpretation:** Similar to Sharpe but more relevant for asymmetric strategies
+
+#### Calmar Ratio
+
+Measures annualized return relative to maximum drawdown.
+
+**Formula:** `annual_return / max_drawdown_pct`
+
+**Interpretation:**
+- > 1.0: Return exceeds max drawdown
+- > 3.0: Strong risk-adjusted performance
+
+## RollingStats
+
+Efficient rolling window statistics calculator.
+
+```rust
+pub struct RollingStats {
+    window_size: usize,
+    values: VecDeque<f64>,
+    sum: f64,
+    sum_sq: f64,
+}
+```
+
+### Constructor
+
+#### `new`
+
+Creates a new rolling statistics calculator.
+
+```rust
+pub fn new(window_size: usize) -> Self
+```
+
+### Methods
+
+#### `add`
+
+Adds a value to the rolling window.
+
+```rust
+pub fn add(&mut self, value: f64)
+```
+
+#### `mean`
+
+Returns the rolling mean.
+
+```rust
+pub fn mean(&self) -> f64
+```
+
+#### `variance`
+
+Returns the rolling variance.
+
+```rust
+pub fn variance(&self) -> f64
+```
+
+#### `std_dev`
+
+Returns the rolling standard deviation.
+
+```rust
+pub fn std_dev(&self) -> f64
+```
+
+#### `sharpe`
+
+Returns the rolling Sharpe ratio (not annualized).
+
+```rust
+pub fn sharpe(&self) -> f64
+```
+
+### Usage Example
+
+```rust
+use nano_backtest::metrics::RollingStats;
+
+let mut rolling = RollingStats::new(20);
+
+for ret in daily_returns {
+    rolling.add(ret);
+    
+    if rolling.is_full() {
+        println!("Rolling Sharpe: {:.2}", rolling.sharpe());
+    }
+}
+```
+
+## Complete Example
+
+```rust
+use nano_backtest::{BacktestConfig, BacktestEngine};
+
+// Run backtest
+let config = BacktestConfig::default();
+let mut engine = BacktestEngine::new(config);
+// ... register instruments and run ...
+engine.run(&mut strategy);
+
+// Access metrics
+let metrics = engine.metrics();
+let stats = engine.stats();
+
+// Basic metrics
+println!("=== Performance Summary ===");
+println!("Total P&L: ${:.2}", metrics.total_pnl);
+println!("Realized P&L: ${:.2}", metrics.realized_pnl);
+println!("Total Fees: ${:.2}", metrics.total_fees);
+println!("Net P&L: ${:.2}", metrics.realized_pnl - metrics.total_fees);
+
+// Trade statistics
+println!("\n=== Trade Statistics ===");
+println!("Total Trades: {}", metrics.num_trades);
+println!("Win Rate: {:.2}%", metrics.win_rate() * 100.0);
+println!("Profit Factor: {:.2}", metrics.profit_factor());
+println!("Avg Trade: ${:.2}", metrics.avg_trade_pnl());
+println!("Avg Winner: ${:.2}", metrics.avg_winning_trade());
+println!("Avg Loser: ${:.2}", metrics.avg_losing_trade());
+
+// Risk metrics
+println!("\n=== Risk Metrics ===");
+println!("Max Drawdown: {:.2}%", metrics.max_drawdown_pct * 100.0);
+println!("Max Drawdown ($): ${:.2}", metrics.max_drawdown_abs);
+println!("Peak P&L: ${:.2}", metrics.peak_pnl);
+
+// Risk-adjusted returns
+println!("\n=== Risk-Adjusted Returns ===");
+println!("Sharpe Ratio: {:.2}", stats.sharpe_ratio);
+println!("Sortino Ratio: {:.2}", stats.sortino_ratio);
+println!("Calmar Ratio: {:.2}", stats.calmar_ratio);
+println!("Recovery Factor: {:.2}", stats.recovery_factor);
+
+// Execution quality
+println!("\n=== Execution Quality ===");
+println!("Total Volume: {} contracts", metrics.total_volume);
+println!("Maker Ratio: {:.2}%", metrics.maker_ratio() * 100.0);
+println!("Buy Fills: {}", metrics.buy_fills);
+println!("Sell Fills: {}", metrics.sell_fills);
+
+// Streaks
+println!("\n=== Streaks ===");
+println!("Max Consecutive Wins: {}", stats.max_consecutive_wins);
+println!("Max Consecutive Losses: {}", stats.max_consecutive_losses);
+```
+
+## See Also
+
+- [BacktestEngine](/api/backtest/engine) - Running backtests
+- [BacktestConfig](/api/backtest/config) - Configuration options

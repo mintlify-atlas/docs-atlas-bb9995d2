@@ -1,0 +1,266 @@
+---
+title: 'Order Book Implementation'
+description: 'High-performance limit order book with 20 price levels and O(log n) updates'
+---
+
+## Overview
+
+NanoARB implements a high-performance limit order book (LOB) designed for HFT applications. The order book maintains up to 20 price levels on each side (bid/ask) with efficient O(log n) update complexity using Rust's `BTreeMap` data structure.
+
+## Core Design
+
+The order book is implemented in `nano-lob/src/orderbook.rs:48` and consists of:
+
+- **Bid side**: Stored in descending order by price (highest bid = best bid)
+- **Ask side**: Stored in ascending order by price (lowest ask = best ask)
+- **Maximum 20 levels** per side (configurable via `MAX_BOOK_LEVELS`)
+- **Fast updates**: O(log n) insert/delete operations
+
+```rust
+pub struct OrderBook {
+    instrument_id: u32,
+    bids: BTreeMap<i64, BookLevel>,
+    asks: BTreeMap<i64, BookLevel>,
+    timestamp: Timestamp,
+    sequence: u32,
+    exponent: i8,
+    update_count: u64,
+}
+```
+
+## Book Levels
+
+Each price level contains detailed market depth information:
+
+```rust
+pub struct BookLevel {
+    pub price: Price,              // Price at this level
+    pub quantity: Quantity,        // Total quantity available
+    pub order_count: u32,         // Number of orders
+    pub last_update: Timestamp,   // Last update time
+}
+```
+
+## Applying Updates
+
+The order book processes market data updates from CME MDP 3.0 and other feeds:
+
+### Snapshot Processing
+
+Snapshots rebuild the entire book state:
+
+```rust
+pub fn apply_snapshot(&mut self, snapshot: &Snapshot) {
+    self.bids.clear();
+    self.asks.clear();
+    self.sequence = snapshot.rpt_seq;
+    self.exponent = snapshot.exponent;
+    
+    for entry in &snapshot.entries {
+        let level = BookLevel::new(
+            Price::from_raw(entry.price),
+            Quantity::new(entry.quantity.max(0) as u32),
+            entry.num_orders as u32,
+            self.timestamp,
+        );
+        
+        match entry.entry_type {
+            EntryType::Bid | EntryType::ImpliedBid => {
+                self.bids.insert(entry.price, level);
+            }
+            EntryType::Offer | EntryType::ImpliedOffer => {
+                self.asks.insert(entry.price, level);
+            }
+            _ => {}
+        }
+    }
+    
+    self.trim_levels();
+}
+```
+
+### Incremental Updates
+
+Supports multiple update actions:
+
+- **New/Change/Overlay**: Add or update a price level
+- **Delete**: Remove a specific price level
+- **DeleteThru**: Remove all levels through a price
+- **DeleteFrom**: Remove all levels from a price
+
+```rust
+match entry.action {
+    UpdateAction::New | UpdateAction::Change | UpdateAction::Overlay => {
+        if quantity.value() > 0 {
+            book_side.insert(price, level);
+        } else {
+            book_side.remove(&price);
+        }
+    }
+    UpdateAction::Delete => {
+        book_side.remove(&price);
+    }
+    UpdateAction::DeleteThru => {
+        if is_bid {
+            book_side.retain(|&p, _| p > price);
+        } else {
+            book_side.retain(|&p, _| p < price);
+        }
+    }
+}
+```
+
+## Accessing Book Data
+
+### Best Bid/Ask (BBO)
+
+```rust
+// Get the best bid and ask
+let (bid_price, bid_qty) = book.best_bid()?;
+let (ask_price, ask_qty) = book.best_ask()?;
+
+// Calculate mid price
+let mid = book.mid_price()?;
+
+// Calculate spread
+let spread = book.spread()?;
+```
+
+### Level Access
+
+Access specific depth levels (0 = best):
+
+```rust
+// Get second-best bid (index 1)
+if let Some(level) = book.bid_level(1) {
+    println!("L2 bid: {} @ {}", level.quantity, level.price);
+}
+
+// Iterate all bid levels (best to worst)
+for level in book.bid_levels() {
+    println!("{} @ {}", level.quantity, level.price);
+}
+```
+
+### Depth Calculation
+
+Calculate total quantity across multiple levels:
+
+```rust
+// Get total bid quantity for top 5 levels
+let total_bid = book.total_bid_quantity(5);
+
+// Get total ask quantity for top 5 levels
+let total_ask = book.total_ask_quantity(5);
+```
+
+## VWAP Calculation
+
+Volume-weighted average price for market impact estimation:
+
+```rust
+// Calculate VWAP for buying 150 contracts
+let vwap = book.vwap(Side::Buy, Quantity::new(150))?;
+
+// This walks through ask levels:
+// 100 @ 10000 + 50 @ 10010 = VWAP of 10003
+```
+
+From `nano-lob/src/orderbook.rs:300`:
+
+```rust
+pub fn vwap(&self, side: Side, quantity: Quantity) -> Option<Price> {
+    let levels: Vec<_> = match side {
+        Side::Buy => self.ask_levels().collect(),
+        Side::Sell => self.bid_levels().collect(),
+    };
+    
+    let mut remaining = quantity.value();
+    let mut total_value: i64 = 0;
+    let mut total_qty: u32 = 0;
+    
+    for level in levels {
+        if remaining == 0 { break; }
+        let fill_qty = remaining.min(level.quantity.value());
+        total_value += level.price.raw() * i64::from(fill_qty);
+        total_qty += fill_qty;
+        remaining -= fill_qty;
+    }
+    
+    if total_qty > 0 {
+        Some(Price::from_raw(total_value / i64::from(total_qty)))
+    } else {
+        None
+    }
+}
+```
+
+## Performance Characteristics
+
+### Time Complexity
+
+- **Insert/Update**: O(log n) via BTreeMap
+- **Delete**: O(log n)
+- **Best bid/ask access**: O(1) amortized
+- **Level iteration**: O(k) for k levels
+
+### Memory Efficiency
+
+- Maximum 20 levels × 2 sides = 40 price levels
+- Each `BookLevel` is ~32 bytes
+- Total memory per book: ~1.5 KB
+
+### Update Rate
+
+The order book can handle:
+- **1M+ updates/second** on modern hardware
+- **Sub-microsecond** update latency
+- Suitable for CME market data (100K+ messages/sec)
+
+## Book Validation
+
+Several validation methods ensure book integrity:
+
+```rust
+// Check if book has any data
+if book.is_empty() {
+    // No bids or asks
+}
+
+// Check if book is valid (has both sides)
+if book.is_valid() {
+    // Has at least one bid and one ask
+}
+
+// Check if book is crossed (bid >= ask)
+if book.is_crossed() {
+    // Invalid state, needs investigation
+}
+```
+
+## Integration Example
+
+```rust
+use nano_lob::OrderBook;
+use nano_feed::messages::BookUpdate;
+
+let mut book = OrderBook::new(instrument_id);
+
+// Apply market data updates
+for update in feed.updates() {
+    book.apply_book_update(&update);
+    
+    // Access current state
+    if let Some((bid, ask)) = book.quote() {
+        let spread_bps = (ask.price.raw() - bid.price.raw()) * 10000 
+                        / bid.price.raw();
+        println!("Spread: {} bps", spread_bps);
+    }
+}
+```
+
+## Related Types
+
+- [Price Types](/concepts/price-types) - Fixed-point price representation
+- [Event-Driven Architecture](/concepts/event-driven) - How book updates flow through the system
+- [Strategies](/concepts/strategies) - Using order book data in trading logic

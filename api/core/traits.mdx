@@ -1,0 +1,616 @@
+---
+title: Core Traits
+description: Interfaces for implementing trading components
+icon: shapes
+---
+
+## Overview
+
+NanoARB's trait-based architecture allows you to implement custom strategies, order books, risk managers, and other trading components. All traits are designed to be thread-safe (`Send + Sync`) for concurrent execution.
+
+## Strategy
+
+Implement custom trading strategies.
+
+### Definition
+
+```rust
+pub trait Strategy: Send + Sync {
+    fn name(&self) -> &str;
+    fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order>;
+    fn on_fill(&mut self, fill: &Fill);
+    fn on_order_ack(&mut self, order_id: OrderId);
+    fn on_order_reject(&mut self, order_id: OrderId, reason: &str);
+    fn on_order_cancel(&mut self, order_id: OrderId);
+    fn position(&self) -> i64;
+    fn pnl(&self) -> f64;
+    fn is_ready(&self) -> bool;
+    fn reset(&mut self);
+}
+```
+
+### Required Methods
+
+<ParamField path="name" type="fn(&self) -> &str">
+  Strategy name for logging and metrics
+  
+  ```rust
+  fn name(&self) -> &str {
+      "MyStrategy"
+  }
+  ```
+</ParamField>
+
+<ParamField path="on_market_data" type="fn(&mut self, book: &dyn OrderBook) -> Vec<Order>">
+  Called on each market data update. Return orders to submit.
+  
+  ```rust
+  fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order> {
+      let mut orders = Vec::new();
+      
+      if let Some((bid_price, bid_qty)) = book.best_bid() {
+          if let Some((ask_price, ask_qty)) = book.best_ask() {
+              // Implement your strategy logic here
+              if should_trade(bid_price, ask_price) {
+                  let order = Order::new_limit(
+                      self.next_order_id(),
+                      self.instrument_id,
+                      Side::Buy,
+                      bid_price,
+                      Quantity::new(10),
+                      TimeInForce::GTC,
+                  );
+                  orders.push(order);
+              }
+          }
+      }
+      
+      orders
+  }
+  ```
+</ParamField>
+
+<ParamField path="on_fill" type="fn(&mut self, fill: &Fill)">
+  Called when an order is filled
+  
+  ```rust
+  fn on_fill(&mut self, fill: &Fill) {
+      self.position += fill.signed_quantity();
+      self.realized_pnl -= fill.fee;
+  }
+  ```
+</ParamField>
+
+<ParamField path="on_order_ack" type="fn(&mut self, order_id: OrderId)">
+  Called when an order is acknowledged by the exchange
+  
+  ```rust
+  fn on_order_ack(&mut self, order_id: OrderId) {
+      self.pending_orders.remove(&order_id);
+      self.active_orders.insert(order_id);
+  }
+  ```
+</ParamField>
+
+<ParamField path="on_order_reject" type="fn(&mut self, order_id: OrderId, reason: &str)">
+  Called when an order is rejected
+  
+  ```rust
+  fn on_order_reject(&mut self, order_id: OrderId, reason: &str) {
+      eprintln!("Order {} rejected: {}", order_id, reason);
+      self.pending_orders.remove(&order_id);
+  }
+  ```
+</ParamField>
+
+<ParamField path="on_order_cancel" type="fn(&mut self, order_id: OrderId)">
+  Called when an order is cancelled
+  
+  ```rust
+  fn on_order_cancel(&mut self, order_id: OrderId) {
+      self.active_orders.remove(&order_id);
+  }
+  ```
+</ParamField>
+
+<ParamField path="position" type="fn(&self) -> i64">
+  Get current position (positive = long, negative = short)
+  
+  ```rust
+  fn position(&self) -> i64 {
+      self.position
+  }
+  ```
+</ParamField>
+
+<ParamField path="pnl" type="fn(&self) -> f64">
+  Get current profit and loss
+  
+  ```rust
+  fn pnl(&self) -> f64 {
+      self.realized_pnl + self.unrealized_pnl
+  }
+  ```
+</ParamField>
+
+<ParamField path="is_ready" type="fn(&self) -> bool">
+  Check if strategy is ready to trade
+  
+  ```rust
+  fn is_ready(&self) -> bool {
+      self.initialized && self.risk_checks_passed()
+  }
+  ```
+</ParamField>
+
+<ParamField path="reset" type="fn(&mut self)">
+  Reset strategy state
+  
+  ```rust
+  fn reset(&mut self) {
+      self.position = 0;
+      self.realized_pnl = 0.0;
+      self.active_orders.clear();
+  }
+  ```
+</ParamField>
+
+### When to Implement
+
+Implement the `Strategy` trait to:
+- Create custom algorithmic trading strategies
+- Implement market making logic
+- Build arbitrage strategies
+- Develop ML-based trading systems
+
+---
+
+## OrderBook
+
+Access market depth and order book state.
+
+### Definition
+
+```rust
+pub trait OrderBook: Send + Sync {
+    fn best_bid(&self) -> Option<(Price, Quantity)>;
+    fn best_ask(&self) -> Option<(Price, Quantity)>;
+    fn mid_price(&self) -> Option<Price>;
+    fn spread(&self) -> Option<Price>;
+    fn quote(&self) -> Option<Quote>;
+    fn bid_at_level(&self, level: usize) -> Option<(Price, Quantity)>;
+    fn ask_at_level(&self, level: usize) -> Option<(Price, Quantity)>;
+    fn bid_depth(&self, levels: usize) -> Quantity;
+    fn ask_depth(&self, levels: usize) -> Quantity;
+    fn timestamp(&self) -> Timestamp;
+}
+```
+
+### Required Methods
+
+<ParamField path="best_bid" type="fn(&self) -> Option<(Price, Quantity)>">
+  Get the best bid price and quantity
+  
+  ```rust
+  fn best_bid(&self) -> Option<(Price, Quantity)> {
+      self.bids.first().map(|level| (level.price, level.quantity))
+  }
+  ```
+</ParamField>
+
+<ParamField path="best_ask" type="fn(&self) -> Option<(Price, Quantity)>">
+  Get the best ask price and quantity
+  
+  ```rust
+  fn best_ask(&self) -> Option<(Price, Quantity)> {
+      self.asks.first().map(|level| (level.price, level.quantity))
+  }
+  ```
+</ParamField>
+
+<ParamField path="mid_price" type="fn(&self) -> Option<Price>">
+  Get the mid price (average of best bid and ask)
+  
+  ```rust
+  fn mid_price(&self) -> Option<Price> {
+      match (self.best_bid(), self.best_ask()) {
+          (Some((bid, _)), Some((ask, _))) => {
+              Some(Price::from_raw((bid.raw() + ask.raw()) / 2))
+          }
+          _ => None,
+      }
+  }
+  ```
+</ParamField>
+
+<ParamField path="spread" type="fn(&self) -> Option<Price>">
+  Get the spread in ticks
+  
+  ```rust
+  fn spread(&self) -> Option<Price> {
+      match (self.best_bid(), self.best_ask()) {
+          (Some((bid, _)), Some((ask, _))) => {
+              Some(Price::from_raw(ask.raw() - bid.raw()))
+          }
+          _ => None,
+      }
+  }
+  ```
+</ParamField>
+
+<ParamField path="quote" type="fn(&self) -> Option<Quote>">
+  Get the current quote (BBO)
+</ParamField>
+
+<ParamField path="bid_at_level" type="fn(&self, level: usize) -> Option<(Price, Quantity)>">
+  Get price at a specific bid level (0 = best)
+  
+  ```rust
+  fn bid_at_level(&self, level: usize) -> Option<(Price, Quantity)> {
+      self.bids.get(level).map(|l| (l.price, l.quantity))
+  }
+  ```
+</ParamField>
+
+<ParamField path="ask_at_level" type="fn(&self, level: usize) -> Option<(Price, Quantity)>">
+  Get ask at a specific level (0 = best)
+</ParamField>
+
+<ParamField path="bid_depth" type="fn(&self, levels: usize) -> Quantity">
+  Get total quantity at bid levels up to depth
+  
+  ```rust
+  fn bid_depth(&self, levels: usize) -> Quantity {
+      self.bids.iter()
+          .take(levels)
+          .fold(Quantity::ZERO, |acc, level| acc + level.quantity)
+  }
+  ```
+</ParamField>
+
+<ParamField path="ask_depth" type="fn(&self, levels: usize) -> Quantity">
+  Get total quantity at ask levels up to depth
+</ParamField>
+
+<ParamField path="timestamp" type="fn(&self) -> Timestamp">
+  Get the current timestamp
+</ParamField>
+
+### When to Implement
+
+Implement the `OrderBook` trait to:
+- Create custom order book implementations
+- Build order book aggregators across exchanges
+- Implement synthetic order books for testing
+- Create order book replay systems from historical data
+
+---
+
+## FillModel
+
+Simulate order fills for backtesting.
+
+### Definition
+
+```rust
+pub trait FillModel: Send + Sync {
+    fn try_fill(
+        &self,
+        order: &Order,
+        book: &dyn OrderBook,
+        current_time: Timestamp,
+    ) -> Option<(Price, Quantity)>;
+    
+    fn fill_probability(
+        &self,
+        queue_position: usize,
+        level_quantity: Quantity,
+    ) -> f64;
+}
+```
+
+### Required Methods
+
+<ParamField path="try_fill" type="fn(&self, order: &Order, book: &dyn OrderBook, current_time: Timestamp) -> Option<(Price, Quantity)>">
+  Simulate a fill attempt for an order. Returns fill price and quantity if filled.
+  
+  ```rust
+  fn try_fill(
+      &self,
+      order: &Order,
+      book: &dyn OrderBook,
+      current_time: Timestamp,
+  ) -> Option<(Price, Quantity)> {
+      match order.order_type {
+          OrderType::Market => {
+              // Market orders fill immediately at best price
+              match order.side {
+                  Side::Buy => book.best_ask()
+                      .map(|(price, qty)| (price, qty.min(order.quantity))),
+                  Side::Sell => book.best_bid()
+                      .map(|(price, qty)| (price, qty.min(order.quantity))),
+              }
+          }
+          OrderType::Limit => {
+              // Limit orders fill when price crosses
+              self.try_fill_limit(order, book)
+          }
+          _ => None,
+      }
+  }
+  ```
+</ParamField>
+
+<ParamField path="fill_probability" type="fn(&self, queue_position: usize, level_quantity: Quantity) -> f64">
+  Get probability of being filled at a given queue position
+  
+  ```rust
+  fn fill_probability(
+      &self,
+      queue_position: usize,
+      level_quantity: Quantity,
+  ) -> f64 {
+      if queue_position == 0 {
+          return 1.0;
+      }
+      
+      let queue_ratio = queue_position as f64 / level_quantity.as_f64();
+      (1.0 - queue_ratio).max(0.0)
+  }
+  ```
+</ParamField>
+
+### When to Implement
+
+Implement the `FillModel` trait to:
+- Create realistic fill simulations for backtesting
+- Model queue position and adverse selection
+- Simulate different market conditions
+- Test strategies under various fill assumptions
+
+---
+
+## RiskManager
+
+Manage position and risk limits.
+
+### Definition
+
+```rust
+pub trait RiskManager: Send + Sync {
+    fn check_order(&self, order: &Order, current_position: i64) -> Result<(), Error>;
+    fn check_position(&self, position: i64) -> Result<(), Error>;
+    fn check_drawdown(&self, pnl: f64, peak_pnl: f64) -> Result<(), Error>;
+    fn should_kill_switch(&self, pnl: f64, position: i64) -> bool;
+    fn max_position(&self) -> i64;
+    fn max_order_size(&self) -> u32;
+}
+```
+
+### Required Methods
+
+<ParamField path="check_order" type="fn(&self, order: &Order, current_position: i64) -> Result<(), Error>">
+  Check if an order passes risk checks
+  
+  ```rust
+  fn check_order(&self, order: &Order, current_position: i64) -> Result<(), Error> {
+      // Check order size
+      if order.quantity.value() > self.max_order_size() {
+          return Err(Error::RiskLimitExceeded(
+              format!("Order size {} exceeds max {}", 
+                      order.quantity.value(), self.max_order_size())
+          ));
+      }
+      
+      // Check resulting position
+      let new_position = current_position + 
+          (order.quantity.as_i64() * order.side.sign());
+      self.check_position(new_position)?;
+      
+      Ok(())
+  }
+  ```
+</ParamField>
+
+<ParamField path="check_position" type="fn(&self, position: i64) -> Result<(), Error>">
+  Check if position limits are breached
+  
+  ```rust
+  fn check_position(&self, position: i64) -> Result<(), Error> {
+      let abs_position = position.abs();
+      if abs_position > self.max_position() {
+          return Err(Error::RiskLimitExceeded(
+              format!("Position {} exceeds max {}", 
+                      abs_position, self.max_position())
+          ));
+      }
+      Ok(())
+  }
+  ```
+</ParamField>
+
+<ParamField path="check_drawdown" type="fn(&self, pnl: f64, peak_pnl: f64) -> Result<(), Error>">
+  Check if drawdown limits are breached
+  
+  ```rust
+  fn check_drawdown(&self, pnl: f64, peak_pnl: f64) -> Result<(), Error> {
+      let drawdown = peak_pnl - pnl;
+      let drawdown_pct = if peak_pnl > 0.0 {
+          drawdown / peak_pnl
+      } else {
+          0.0
+      };
+      
+      if drawdown_pct > self.max_drawdown_pct {
+          return Err(Error::RiskLimitExceeded(
+              format!("Drawdown {:.2}% exceeds max {:.2}%",
+                      drawdown_pct * 100.0, self.max_drawdown_pct * 100.0)
+          ));
+      }
+      Ok(())
+  }
+  ```
+</ParamField>
+
+<ParamField path="should_kill_switch" type="fn(&self, pnl: f64, position: i64) -> bool">
+  Check if we should kill all positions (emergency stop)
+  
+  ```rust
+  fn should_kill_switch(&self, pnl: f64, position: i64) -> bool {
+      pnl < self.kill_switch_loss || position.abs() > self.kill_switch_position
+  }
+  ```
+</ParamField>
+
+<ParamField path="max_position" type="fn(&self) -> i64">
+  Get maximum allowed position
+</ParamField>
+
+<ParamField path="max_order_size" type="fn(&self) -> u32">
+  Get maximum allowed order size
+</ParamField>
+
+### When to Implement
+
+Implement the `RiskManager` trait to:
+- Enforce position and order size limits
+- Implement custom risk rules
+- Create dynamic risk management based on market conditions
+- Add compliance checks
+
+---
+
+## ExecutionHandler
+
+Handle order submission and management.
+
+### Definition
+
+```rust
+pub trait ExecutionHandler: Send + Sync {
+    fn submit_order(&mut self, order: Order) -> Result<OrderId, Error>;
+    fn cancel_order(&mut self, order_id: OrderId) -> Result<(), Error>;
+    fn modify_order(
+        &mut self,
+        order_id: OrderId,
+        new_price: Option<Price>,
+        new_quantity: Option<Quantity>,
+    ) -> Result<(), Error>;
+    fn get_order(&self, order_id: OrderId) -> Option<&Order>;
+    fn active_orders(&self) -> Vec<&Order>;
+}
+```
+
+### When to Implement
+
+Implement the `ExecutionHandler` trait to:
+- Connect to exchange APIs
+- Create paper trading simulators
+- Build order routing systems
+- Implement order management systems (OMS)
+
+---
+
+## LatencyModel
+
+Model network latency for backtesting.
+
+### Definition
+
+```rust
+pub trait LatencyModel: Send + Sync {
+    fn order_latency(&self) -> i64;
+    fn market_data_latency(&self) -> i64;
+    fn ack_latency(&self) -> i64;
+    fn reset(&mut self);
+}
+```
+
+### When to Implement
+
+Implement the `LatencyModel` trait to:
+- Simulate network latency in backtests
+- Test strategy sensitivity to latency
+- Model different network conditions
+- Create realistic simulation environments
+
+---
+
+## FeeModel
+
+Calculate trading fees.
+
+### Definition
+
+```rust
+pub trait FeeModel: Send + Sync {
+    fn calculate_fee(
+        &self,
+        price: Price,
+        quantity: Quantity,
+        is_maker: bool,
+        side: Side,
+    ) -> f64;
+}
+```
+
+### When to Implement
+
+Implement the `FeeModel` trait to:
+- Model exchange-specific fee structures
+- Account for maker/taker fees
+- Implement tiered fee schedules
+- Calculate fee rebates
+
+---
+
+## ModelInference
+
+Run machine learning model inference.
+
+### Definition
+
+```rust
+pub trait ModelInference: Send + Sync {
+    type Input;
+    type Output;
+    
+    fn predict(&self, input: &Self::Input) -> Result<Self::Output, Error>;
+    fn name(&self) -> &str;
+    fn expected_latency_ns(&self) -> u64;
+}
+```
+
+### When to Implement
+
+Implement the `ModelInference` trait to:
+- Integrate ML models into strategies
+- Run real-time predictions
+- Benchmark model latency
+- A/B test different models
+
+---
+
+## MetricsCollector
+
+Collect performance and operational metrics.
+
+### Definition
+
+```rust
+pub trait MetricsCollector: Send + Sync {
+    fn record_latency(&self, name: &str, latency_ns: u64);
+    fn increment_counter(&self, name: &str, value: u64);
+    fn set_gauge(&self, name: &str, value: f64);
+    fn record_pnl(&self, pnl: f64);
+    fn record_fill(&self, side: Side, quantity: Quantity, is_maker: bool);
+}
+```
+
+### When to Implement
+
+Implement the `MetricsCollector` trait to:
+- Export metrics to monitoring systems (Prometheus, DataDog)
+- Log performance data
+- Track strategy metrics
+- Monitor system health

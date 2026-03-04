@@ -1,0 +1,478 @@
+---
+title: "OrderBook"
+description: "High-performance limit order book implementation with 20 price levels"
+---
+
+## Overview
+
+The `OrderBook` provides a high-performance limit order book implementation that maintains up to 20 price levels on each side. It processes CME MDP3.0 market data messages and provides efficient queries for market data, depth analysis, and feature extraction.
+
+Source: `nano-lob/src/orderbook.rs`
+
+## OrderBook
+
+```rust
+pub struct OrderBook {
+    instrument_id: u32,
+    bids: BTreeMap<i64, BookLevel>,
+    asks: BTreeMap<i64, BookLevel>,
+    timestamp: Timestamp,
+    sequence: u32,
+    exponent: i8,
+    update_count: u64,
+}
+```
+
+### BookLevel
+
+Represents a single price level in the order book.
+
+```rust
+pub struct BookLevel {
+    pub price: Price,
+    pub quantity: Quantity,
+    pub order_count: u32,
+    pub last_update: Timestamp,
+}
+```
+
+## Construction
+
+### `new`
+
+Creates a new empty order book for an instrument.
+
+```rust
+pub fn new(instrument_id: u32) -> Self
+```
+
+**Parameters:**
+- `instrument_id`: Unique identifier for the instrument
+
+**Example:**
+```rust
+use nano_lob::OrderBook;
+
+let book = OrderBook::new(1);
+```
+
+## Market Data Updates
+
+### `apply_book_update`
+
+Applies an incremental book update message.
+
+```rust
+pub fn apply_book_update(&mut self, update: &BookUpdate)
+```
+
+**Parameters:**
+- `update`: MDP3.0 incremental book update message
+
+**Handles:**
+- New price levels
+- Price/quantity changes
+- Level deletions
+- Delete-through and delete-from operations
+
+**Example:**
+```rust
+for update in book_updates {
+    book.apply_book_update(&update);
+}
+```
+
+### `apply_snapshot`
+
+Applies a full book snapshot message.
+
+```rust
+pub fn apply_snapshot(&mut self, snapshot: &Snapshot)
+```
+
+**Parameters:**
+- `snapshot`: MDP3.0 snapshot message
+
+**Details:**
+- Clears existing book state
+- Rebuilds book from snapshot data
+- Resets sequence number
+
+**Use case:** Initial book construction or recovery after gap
+
+## Best Bid and Offer (BBO)
+
+### `best_bid`
+
+Returns the best bid price and quantity.
+
+```rust
+pub fn best_bid(&self) -> Option<(Price, Quantity)>
+```
+
+**Returns:** `Some((price, quantity))` or `None` if no bids
+
+### `best_ask`
+
+Returns the best ask price and quantity.
+
+```rust
+pub fn best_ask(&self) -> Option<(Price, Quantity)>
+```
+
+**Returns:** `Some((price, quantity))` or `None` if no asks
+
+### Example
+
+```rust
+if let (Some((bid_price, bid_qty)), Some((ask_price, ask_qty))) = 
+    (book.best_bid(), book.best_ask()) {
+    println!("BBO: {}@{} / {}@{}", 
+        bid_qty.value(), bid_price.as_f64(),
+        ask_qty.value(), ask_price.as_f64());
+}
+```
+
+## Price Calculations
+
+### `mid_price`
+
+Calculates the mid-price between best bid and ask.
+
+```rust
+pub fn mid_price(&self) -> Option<Price>
+```
+
+**Returns:** `Some(price)` if both sides exist, otherwise `None`
+
+**Formula:** `(best_bid + best_ask) / 2`
+
+### `spread`
+
+Calculates the bid-ask spread.
+
+```rust
+pub fn spread(&self) -> Option<Price>
+```
+
+**Returns:** Spread as a `Price` (in ticks)
+
+**Formula:** `best_ask - best_bid`
+
+### `quote`
+
+Returns a complete quote with BBO and timestamp.
+
+```rust
+pub fn quote(&self) -> Option<Quote>
+```
+
+**Returns:** `Quote` struct containing bid/ask prices, quantities, and timestamp
+
+## Level Access
+
+### `bid_level`
+
+Gets a bid level by index (0 = best).
+
+```rust
+pub fn bid_level(&self, index: usize) -> Option<&BookLevel>
+```
+
+**Parameters:**
+- `index`: Level index (0 = best bid, 1 = second best, etc.)
+
+### `ask_level`
+
+Gets an ask level by index (0 = best).
+
+```rust
+pub fn ask_level(&self, index: usize) -> Option<&BookLevel>
+```
+
+### `bid_at_level`
+
+Gets bid price and quantity at a specific level.
+
+```rust
+pub fn bid_at_level(&self, level: usize) -> Option<(Price, Quantity)>
+```
+
+### `ask_at_level`
+
+Gets ask price and quantity at a specific level.
+
+```rust
+pub fn ask_at_level(&self, level: usize) -> Option<(Price, Quantity)>
+```
+
+### Example
+
+```rust
+// Print top 5 levels
+for i in 0..5 {
+    if let Some(level) = book.bid_level(i) {
+        println!("Bid L{}: {} @ {}", 
+            i, level.quantity.value(), level.price.as_f64());
+    }
+    if let Some(level) = book.ask_level(i) {
+        println!("Ask L{}: {} @ {}", 
+            i, level.quantity.value(), level.price.as_f64());
+    }
+}
+```
+
+## Level Iteration
+
+### `bid_levels`
+
+Returns an iterator over bid levels from best to worst.
+
+```rust
+pub fn bid_levels(&self) -> impl Iterator<Item = &BookLevel>
+```
+
+### `ask_levels`
+
+Returns an iterator over ask levels from best to worst.
+
+```rust
+pub fn ask_levels(&self) -> impl Iterator<Item = &BookLevel>
+```
+
+### Example
+
+```rust
+// Calculate total bid volume
+let total_bid_volume: u32 = book.bid_levels()
+    .map(|level| level.quantity.value())
+    .sum();
+```
+
+## Depth Queries
+
+### `bid_depth`
+
+Returns the number of bid levels.
+
+```rust
+pub fn bid_depth(&self) -> usize
+```
+
+### `ask_depth`
+
+Returns the number of ask levels.
+
+```rust
+pub fn ask_depth(&self) -> usize
+```
+
+### `total_bid_quantity`
+
+Calculates total bid quantity up to N levels.
+
+```rust
+pub fn total_bid_quantity(&self, levels: usize) -> Quantity
+```
+
+**Example:**
+```rust
+let top_5_bid_qty = book.total_bid_quantity(5);
+```
+
+### `total_ask_quantity`
+
+Calculates total ask quantity up to N levels.
+
+```rust
+pub fn total_ask_quantity(&self, levels: usize) -> Quantity
+```
+
+## VWAP Calculation
+
+### `vwap`
+
+Calculates volume-weighted average price for a given quantity.
+
+```rust
+pub fn vwap(&self, side: Side, quantity: Quantity) -> Option<Price>
+```
+
+**Parameters:**
+- `side`: `Side::Buy` (uses ask side) or `Side::Sell` (uses bid side)
+- `quantity`: Total quantity to fill
+
+**Returns:** VWAP if sufficient liquidity exists, otherwise `None`
+
+**Use case:** Estimating execution price for a market order
+
+**Example:**
+```rust
+use nano_core::types::{Side, Quantity};
+
+let quantity = Quantity::new(100);
+if let Some(vwap_price) = book.vwap(Side::Buy, quantity) {
+    println!("VWAP for 100 contracts (buy): {}", vwap_price.as_f64());
+}
+```
+
+## State Queries
+
+### `is_empty`
+
+Checks if the book has no levels on either side.
+
+```rust
+pub fn is_empty(&self) -> bool
+```
+
+### `is_valid`
+
+Checks if the book has at least one level on both sides.
+
+```rust
+pub fn is_valid(&self) -> bool
+```
+
+### `is_crossed`
+
+Checks if the book is crossed (bid >= ask).
+
+```rust
+pub fn is_crossed(&self) -> bool
+```
+
+**Returns:** `true` if best bid >= best ask (market anomaly)
+
+## Metadata
+
+### `instrument_id`
+
+Returns the instrument ID.
+
+```rust
+pub fn instrument_id(&self) -> u32
+```
+
+### `sequence`
+
+Returns the current sequence number.
+
+```rust
+pub fn sequence(&self) -> u32
+```
+
+**Use case:** Gap detection in market data feed
+
+### `update_count`
+
+Returns the total number of updates processed.
+
+```rust
+pub fn update_count(&self) -> u64
+```
+
+### `timestamp`
+
+Returns the timestamp of the last update.
+
+```rust
+pub fn timestamp(&self) -> Timestamp
+```
+
+## Maintenance
+
+### `clear`
+
+Clears all levels and resets the book.
+
+```rust
+pub fn clear(&mut self)
+```
+
+### `set_exponent`
+
+Sets the price exponent for the instrument.
+
+```rust
+pub fn set_exponent(&mut self, exponent: i8)
+```
+
+**Details:** CME uses exponents to represent decimal places (e.g., -2 for 2 decimals)
+
+## OrderBookTrait Implementation
+
+The `OrderBook` implements the `OrderBookTrait` from `nano-core`, providing a standard interface for all order book implementations.
+
+```rust
+impl OrderBookTrait for OrderBook {
+    fn best_bid(&self) -> Option<(Price, Quantity)>;
+    fn best_ask(&self) -> Option<(Price, Quantity)>;
+    fn mid_price(&self) -> Option<Price>;
+    fn spread(&self) -> Option<Price>;
+    fn quote(&self) -> Option<Quote>;
+    fn bid_at_level(&self, level: usize) -> Option<(Price, Quantity)>;
+    fn ask_at_level(&self, level: usize) -> Option<(Price, Quantity)>;
+    fn bid_depth(&self, levels: usize) -> Quantity;
+    fn ask_depth(&self, levels: usize) -> Quantity;
+    fn timestamp(&self) -> Timestamp;
+}
+```
+
+## Complete Example
+
+```rust
+use nano_lob::OrderBook;
+use nano_feed::messages::{BookUpdate, Snapshot};
+use nano_core::types::Side;
+
+// Create order book
+let mut book = OrderBook::new(1);
+
+// Apply initial snapshot
+book.apply_snapshot(&snapshot);
+
+// Process incremental updates
+for update in updates {
+    book.apply_book_update(&update);
+    
+    // Check book validity
+    if !book.is_valid() {
+        continue;
+    }
+    
+    // Get BBO
+    if let (Some((bid_px, bid_qty)), Some((ask_px, ask_qty))) = 
+        (book.best_bid(), book.best_ask()) {
+        
+        let mid = book.mid_price().unwrap();
+        let spread = book.spread().unwrap();
+        
+        println!("{}@{} | {} | {}@{} (spread: {} ticks)",
+            bid_qty.value(), bid_px.as_f64(),
+            mid.as_f64(),
+            ask_qty.value(), ask_px.as_f64(),
+            spread.raw());
+    }
+    
+    // Calculate book imbalance
+    let bid_depth_5 = book.total_bid_quantity(5).value();
+    let ask_depth_5 = book.total_ask_quantity(5).value();
+    let imbalance = (bid_depth_5 as f64 - ask_depth_5 as f64) / 
+                    (bid_depth_5 as f64 + ask_depth_5 as f64);
+    
+    println!("5-level imbalance: {:.2}", imbalance);
+}
+```
+
+## Performance Characteristics
+
+- **Update complexity:** O(log N) for insert/delete, where N &lt;= 20
+- **BBO access:** O(1)
+- **Level access:** O(log N)
+- **Memory usage:** ~4KB per book (with 20 levels)
+
+## See Also
+
+- [LobFeatureExtractor](/api/lob/features) - Feature extraction from order books
+- [Market Data Feed](/api/feed/parser) - Parsing CME market data

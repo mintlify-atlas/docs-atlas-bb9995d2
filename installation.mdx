@@ -1,0 +1,477 @@
+---
+title: Installation
+description: Complete installation guide for NanoARB with system requirements and troubleshooting
+---
+
+## System requirements
+
+NanoARB is designed for high-performance trading and has specific system requirements.
+
+### Minimum requirements
+
+- **Rust**: 1.75 or higher (1.84+ recommended)
+- **Operating System**: Linux, macOS, or Windows with WSL2
+- **CPU**: x86-64 architecture (AMD or Intel)
+- **Memory**: 4GB RAM minimum (8GB+ recommended)
+- **Disk**: 2GB free space for builds
+
+### Recommended requirements
+
+For optimal performance:
+- **Rust**: 1.84+
+- **CPU**: AMD EPYC or Intel Xeon with high single-thread performance
+- **Memory**: 16GB+ RAM
+- **OS**: Linux kernel 5.10+ for best latency performance
+
+<Note>
+  Performance benchmarks in the README (780ns median latency) were measured on AMD EPYC 7763 (AWS c6a.8xlarge).
+</Note>
+
+## Installing Rust
+
+NanoARB requires Rust 1.75 or higher. The recommended way to install Rust is via `rustup`.
+
+<Tabs>
+  <Tab title="Linux/macOS">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    source $HOME/.cargo/env
+    ```
+    
+    Verify installation:
+    ```bash
+    rustc --version
+    cargo --version
+    ```
+  </Tab>
+  
+  <Tab title="Windows (WSL2)">
+    First, install WSL2 with Ubuntu:
+    ```powershell
+    wsl --install -d Ubuntu
+    ```
+    
+    Then inside WSL2:
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    source $HOME/.cargo/env
+    ```
+  </Tab>
+</Tabs>
+
+### Updating Rust
+
+If you already have Rust installed, make sure it's up to date:
+
+```bash
+rustup update stable
+rustc --version  # Should be 1.75+
+```
+
+## Installing dependencies
+
+### Core dependencies
+
+NanoARB has minimal runtime dependencies since it's written entirely in Rust. However, you'll need build tools.
+
+<Tabs>
+  <Tab title="Ubuntu/Debian">
+    ```bash
+    sudo apt-get update
+    sudo apt-get install -y \
+      build-essential \
+      pkg-config \
+      libssl-dev \
+      git
+    ```
+  </Tab>
+  
+  <Tab title="Fedora/RHEL/CentOS">
+    ```bash
+    sudo dnf install -y \
+      gcc \
+      gcc-c++ \
+      make \
+      openssl-devel \
+      pkg-config \
+      git
+    ```
+  </Tab>
+  
+  <Tab title="macOS">
+    ```bash
+    # Install Xcode Command Line Tools
+    xcode-select --install
+    
+    # Or via Homebrew
+    brew install openssl pkg-config
+    ```
+  </Tab>
+</Tabs>
+
+### UI dependencies (optional)
+
+For the real-time dashboard, you'll need Node.js and pnpm:
+
+<Tabs>
+  <Tab title="Using Node Version Manager">
+    ```bash
+    # Install nvm
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+    
+    # Install Node.js 18+
+    nvm install 18
+    nvm use 18
+    
+    # Install pnpm
+    npm install -g pnpm
+    ```
+  </Tab>
+  
+  <Tab title="Using Package Manager">
+    ```bash
+    # Ubuntu/Debian
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+    npm install -g pnpm
+    
+    # macOS
+    brew install node@18 pnpm
+    ```
+  </Tab>
+</Tabs>
+
+Verify installation:
+```bash
+node --version  # Should be v18+
+pnpm --version
+```
+
+### Python dependencies (optional)
+
+For ML model training, you'll need Python 3.11+:
+
+```bash
+# Create virtual environment
+cd python/training
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+<Warning>
+  **GPU recommended for training**
+  
+  Training Mamba models is computationally intensive. A CUDA-compatible GPU with 8GB+ VRAM is strongly recommended. CPU training will be significantly slower.
+</Warning>
+
+Key Python packages (from `requirements.txt`):
+- `torch>=2.1.0` - PyTorch for deep learning
+- `mamba-ssm>=1.2.0` - State Space Models (Linux only)
+- `onnx>=1.15.0` - ONNX export for Rust inference
+- `gymnasium>=0.29.0` - RL environments
+- `d3rlpy>=2.3.0` - Offline RL algorithms
+
+## Installing NanoARB
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/dhir1007/nanoARB.git
+    cd nanoARB
+    ```
+  </Step>
+
+  <Step title="Build the project">
+    Build in release mode for optimal performance:
+    ```bash
+    cargo build --release
+    ```
+    
+    This will compile all workspace crates:
+    - `nano-core` - Core types and traits
+    - `nano-feed` - Market data parser
+    - `nano-lob` - Order book engine
+    - `nano-model` - ML inference
+    - `nano-backtest` - Backtesting engine
+    - `nano-strategy` - Trading strategies
+    - `nano-gateway` - Main binary
+    
+    The compiled binary will be at `target/release/nanoarb`.
+    
+    <Note>
+      First build can take 5-10 minutes depending on your system. Subsequent builds are incremental and much faster.
+    </Note>
+  </Step>
+
+  <Step title="Install UI dependencies (optional)">
+    ```bash
+    cd nano-arb-ui-development
+    pnpm install
+    cd ..
+    ```
+    
+    This installs Next.js and React dependencies for the dashboard UI.
+  </Step>
+
+  <Step title="Verify installation">
+    ```bash
+    ./target/release/nanoarb --help
+    ```
+    
+    Expected output:
+    ```
+    Nanosecond-level CME futures market-making engine
+    
+    Usage: nanoarb [OPTIONS]
+    
+    Options:
+      -c, --config <CONFIG>        [default: config.toml]
+      -b, --backtest              
+      -d, --data <DATA>           
+      -v, --verbose               
+      -m, --metrics-port <PORT>    [default: 9090]
+      -h, --help                   Print help
+      -V, --version                Print version
+    ```
+  </Step>
+
+  <Step title="Run tests">
+    Verify everything works correctly:
+    ```bash
+    cargo test --workspace
+    ```
+    
+    All tests should pass. If any fail, see the [Troubleshooting](#troubleshooting) section.
+  </Step>
+</Steps>
+
+## Docker setup (optional)
+
+For monitoring with Prometheus and Grafana:
+
+```bash
+# Install Docker Desktop
+# https://docs.docker.com/get-docker/
+
+# Verify installation
+docker --version
+docker compose version
+
+# Start monitoring stack
+cd docker
+docker compose -f docker-compose-monitoring.yml up -d
+```
+
+Access points:
+- Grafana: [http://localhost:3000](http://localhost:3000) (admin/nanoarb)
+- Prometheus: [http://localhost:9091](http://localhost:9091)
+
+## Platform-specific notes
+
+### Linux
+
+NanoARB is optimized for Linux. For best performance:
+
+```bash
+# Disable CPU frequency scaling
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+# Disable transparent huge pages
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+
+# Increase network buffer sizes
+sudo sysctl -w net.core.rmem_max=134217728
+sudo sysctl -w net.core.wmem_max=134217728
+```
+
+<Warning>
+  These performance tweaks require root access and affect system-wide settings. Only apply in dedicated trading environments.
+</Warning>
+
+### macOS
+
+NanoARB works on macOS but with slightly higher latency than Linux. Some notes:
+
+- Use Apple Silicon (M1/M2/M3) for best performance
+- Intel Macs are supported but will be slower
+- Some Python packages (mamba-ssm) may not be available on macOS
+
+### Windows
+
+Native Windows is not recommended. Use WSL2 instead:
+
+```powershell
+# In PowerShell (as Administrator)
+wsl --install -d Ubuntu
+wsl --set-default-version 2
+```
+
+Then follow Linux installation instructions inside WSL2.
+
+## Cargo.toml overview
+
+NanoARB's `Cargo.toml` defines a workspace with optimized release settings:
+
+```toml Cargo.toml (excerpt)
+[workspace]
+resolver = "2"
+members = [
+    "crates/nano-core",
+    "crates/nano-feed",
+    "crates/nano-lob",
+    "crates/nano-model",
+    "crates/nano-backtest",
+    "crates/nano-strategy",
+    "crates/nano-gateway",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+lto = "fat"              # Full link-time optimization
+codegen-units = 1        # Single codegen unit for best optimization
+panic = "abort"          # Smaller binary, no unwinding
+strip = true             # Remove debug symbols
+opt-level = 3            # Maximum optimization
+```
+
+Key dependencies:
+- `tokio` - Async runtime
+- `axum` - HTTP server
+- `nom` - Zero-copy parsing
+- `ndarray` - Tensor operations
+- `prometheus-client` - Metrics
+- `rust_decimal` - Fixed-point arithmetic
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Cargo build fails with linker errors">
+    Install development tools:
+    
+    ```bash
+    # Ubuntu/Debian
+    sudo apt-get install build-essential pkg-config libssl-dev
+    
+    # Fedora/RHEL
+    sudo dnf groupinstall "Development Tools"
+    sudo dnf install openssl-devel
+    
+    # macOS
+    xcode-select --install
+    ```
+  </Accordion>
+
+  <Accordion title="Rust version too old">
+    NanoARB requires Rust 1.75+. Update:
+    
+    ```bash
+    rustup update stable
+    rustup default stable
+    rustc --version
+    ```
+  </Accordion>
+
+  <Accordion title="Out of memory during build">
+    If compilation runs out of memory, try:
+    
+    ```bash
+    # Build without debug info
+    cargo build --release --config profile.release.debug=false
+    
+    # Or build crates individually
+    cargo build --release -p nano-core
+    cargo build --release -p nano-feed
+    # ... etc
+    ```
+  </Accordion>
+
+  <Accordion title="Tests fail with 'address already in use'">
+    Another process is using port 9090:
+    
+    ```bash
+    lsof -ti:9090 | xargs kill -9
+    cargo test --workspace
+    ```
+  </Accordion>
+
+  <Accordion title="pnpm install fails">
+    Clear pnpm cache and retry:
+    
+    ```bash
+    pnpm store prune
+    rm -rf nano-arb-ui-development/node_modules
+    cd nano-arb-ui-development
+    pnpm install
+    ```
+  </Accordion>
+
+  <Accordion title="Python mamba-ssm installation fails">
+    `mamba-ssm` only supports Linux with CUDA. On macOS or without GPU:
+    
+    1. Skip mamba-ssm (you can still use pre-trained ONNX models)
+    2. Use Google Colab for training (see `colab_training.py`)
+    3. Train on a Linux GPU instance
+    
+    ```bash
+    # Install without mamba-ssm
+    pip install -r requirements.txt --no-deps
+    pip install torch numpy pandas scikit-learn onnx onnxruntime
+    ```
+  </Accordion>
+
+  <Accordion title="Binary is too large">
+    The release binary with full LTO can be 50-100MB. To reduce size:
+    
+    ```toml
+    # In Cargo.toml [profile.release]
+    strip = true          # Already enabled
+    lto = "thin"          # Use thin LTO instead of fat
+    codegen-units = 4     # Use more codegen units
+    ```
+    
+    Then rebuild:
+    ```bash
+    cargo clean
+    cargo build --release
+    ```
+    
+    Note: This may slightly reduce performance.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+Now that NanoARB is installed, you can:
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get your first backtest running
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Customize trading parameters
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference">
+    Explore the full API
+  </Card>
+  <Card title="Model Training" icon="brain" href="/model-training">
+    Train custom ML models
+  </Card>
+</CardGroup>
+
+## Getting help
+
+If you encounter issues not covered here:
+
+1. Check the [GitHub Issues](https://github.com/dhir1007/nanoARB/issues)
+2. Review the [Contributing Guide](https://github.com/dhir1007/nanoARB/blob/main/CONTRIBUTING.md)
+3. Open a new issue with:
+   - Your OS and Rust version (`rustc --version`)
+   - Full error output
+   - Steps to reproduce

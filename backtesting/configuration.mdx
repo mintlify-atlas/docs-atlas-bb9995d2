@@ -1,0 +1,355 @@
+---
+title: Backtest Configuration
+description: Configure backtest parameters, latency models, fees, risk limits, and execution simulation
+---
+
+The backtesting engine uses `BacktestConfig` to control all aspects of simulation realism, from network latency to fill probabilities.
+
+## BacktestConfig Structure
+
+The main configuration is defined in `nano-backtest/src/config.rs:11-29`:
+
+```rust
+pub struct BacktestConfig {
+    pub initial_capital: f64,
+    pub latency: LatencyConfig,
+    pub fees: FeeConfig,
+    pub risk: RiskConfig,
+    pub execution: ExecutionConfig,
+    pub output: OutputConfig,
+}
+```
+
+### Initial Capital
+
+Starting capital in USD for the backtest.
+
+```rust
+initial_capital: 1_000_000.0  // $1M default
+```
+
+## Latency Configuration
+
+Realistic latency simulation is critical for HFT backtesting. The `LatencyConfig` struct (`config.rs:104-132`) models network and exchange delays:
+
+```rust
+pub struct LatencyConfig {
+    pub order_latency_ns: u64,           // Order submission latency
+    pub market_data_latency_ns: u64,     // Market data reception latency
+    pub ack_latency_ns: u64,             // Order acknowledgment latency
+    pub jitter_ns: u64,                  // Latency jitter (std dev)
+    pub use_random_jitter: bool,         // Enable random jitter
+}
+```
+
+### Latency Components
+
+| Component | Description | Typical Range |
+|-----------|-------------|---------------|
+| `order_latency_ns` | Time from order submission to exchange receipt | 5,000 - 200,000 ns |
+| `market_data_latency_ns` | Time from exchange update to strategy receipt | 2,500 - 100,000 ns |
+| `ack_latency_ns` | Time from exchange ack to strategy receipt | 5,000 - 250,000 ns |
+| `jitter_ns` | Standard deviation of latency variance | 1,000 - 50,000 ns |
+
+### Jitter Models
+
+The latency simulator supports multiple jitter models (`latency.rs:26-52`):
+
+- **None**: Deterministic latency (no variance)
+- **Uniform**: Random jitter in range `[-max_jitter, +max_jitter]`
+- **Normal**: Gaussian distribution with configurable std dev
+- **LogNormal**: Realistic network latency distribution
+- **Empirical**: Based on historical percentile data `[p50, p75, p90, p95, p99]`
+
+### Preset Latency Profiles
+
+**Aurora (CME Primary Colo)** - `latency.rs:215-220`:
+```rust
+ColoLatencyModel::aurora()  // 5μs to exchange, 2μs processing
+```
+
+**Aggressive HFT** - `config.rs:47-56`:
+```toml
+order_latency_ns = 50_000       # 50 microseconds
+market_data_latency_ns = 10_000 # 10 microseconds
+ack_latency_ns = 60_000         # 60 microseconds
+jitter_ns = 5_000               # 5 microseconds jitter
+use_random_jitter = true
+```
+
+**Conservative** - `config.rs:76-82`:
+```toml
+order_latency_ns = 200_000      # 200 microseconds
+market_data_latency_ns = 50_000 # 50 microseconds
+ack_latency_ns = 250_000        # 250 microseconds
+jitter_ns = 50_000              # 50 microseconds jitter
+use_random_jitter = true
+```
+
+## Fee Configuration
+
+The `FeeConfig` struct (`config.rs:134-172`) models exchange and clearing fees:
+
+```rust
+pub struct FeeConfig {
+    pub maker_fee: f64,      // Fee per contract for adding liquidity
+    pub taker_fee: f64,      // Fee per contract for taking liquidity
+    pub exchange_fee: f64,   // Exchange fee per contract
+    pub clearing_fee: f64,   // Clearing house fee per contract
+}
+```
+
+### CME Default Fees
+
+```rust
+FeeConfig::default()  // Uses CME futures fees:
+// maker_fee: CME_MAKER_FEE
+// taker_fee: CME_TAKER_FEE
+// exchange_fee: CME_EXCHANGE_FEE
+// clearing_fee: CME_CLEARING_FEE
+```
+
+### Fee Calculation
+
+Total fee per trade:
+```rust
+fee = (maker_or_taker_fee + exchange_fee + clearing_fee) * quantity
+```
+
+Example for a 10-contract maker trade:
+```rust
+fees.calculate_fee(10, true)  // is_maker = true
+```
+
+## Risk Configuration
+
+The `RiskConfig` struct (`config.rs:174-207`) defines position limits and risk controls:
+
+```rust
+pub struct RiskConfig {
+    pub max_position: i64,          // Maximum net position (contracts)
+    pub max_order_size: u32,        // Maximum single order size
+    pub max_drawdown_pct: f64,      // Kill switch drawdown threshold
+    pub max_daily_loss: f64,        // Maximum daily loss in dollars
+    pub max_open_orders: usize,     // Maximum concurrent open orders
+    pub enable_kill_switch: bool,   // Enable automatic shutdown
+}
+```
+
+### Default Risk Limits
+
+```toml
+max_position = 100          # DEFAULT_MAX_INVENTORY
+max_order_size = 20         # contracts
+max_drawdown_pct = 0.05     # 5% drawdown limit
+max_daily_loss = 100_000.0  # $100k daily loss limit
+max_open_orders = 20        # concurrent orders
+enable_kill_switch = true   # auto-stop on breach
+```
+
+### Risk Presets
+
+**Aggressive HFT**:
+```toml
+max_position = 50
+max_order_size = 10
+max_drawdown_pct = 0.04  # 4%
+max_daily_loss = 50_000.0
+```
+
+**Conservative**:
+```toml
+max_position = 20
+max_order_size = 5
+max_drawdown_pct = 0.03  # 3%
+max_daily_loss = 30_000.0
+```
+
+## Execution Configuration
+
+The `ExecutionConfig` struct (`config.rs:209-242`) controls fill simulation realism:
+
+```rust
+pub struct ExecutionConfig {
+    pub track_queue_position: bool,       // Track position in order queue
+    pub fill_probability_decay: f64,      // Fill prob decay with queue depth
+    pub partial_fill_probability: f64,    // Probability of partial fills
+    pub min_partial_fill: u32,            // Minimum partial fill size
+    pub simulate_adverse_selection: bool, // Model adverse selection
+    pub adverse_selection_prob: f64,      // Adverse selection probability
+}
+```
+
+### Fill Simulation
+
+**Queue Position Tracking** (`execution.rs:63-68`):
+- Tracks order position in the limit order book queue
+- Fill probability decays exponentially: `decay^queue_position`
+- Default decay: 0.9 (90% probability at front, 81% at position 2, etc.)
+
+**Partial Fills** (`execution.rs:185-198`):
+- Simulates realistic partial execution
+- Default 20% probability of partial fill
+- Fill size randomly chosen between `min_partial_fill` and remaining quantity
+
+**Adverse Selection** (`execution.rs:171-177`):
+- Models the tendency to get filled when market moves against you
+- Default 10% probability that fill doesn't occur due to adverse selection
+- Critical for realistic maker strategy backtesting
+
+### Default Execution Settings
+
+```toml
+track_queue_position = true
+fill_probability_decay = 0.9
+partial_fill_probability = 0.2
+min_partial_fill = 1
+simulate_adverse_selection = true
+adverse_selection_prob = 0.1
+```
+
+**Conservative Preset** (`config.rs:93-97`):
+```toml
+fill_probability_decay = 0.7  # More conservative fills
+partial_fill_probability = 0.4 # More partial fills
+```
+
+## Output Configuration
+
+The `OutputConfig` struct (`config.rs:244-273`) controls logging and data recording:
+
+```rust
+pub struct OutputConfig {
+    pub verbosity: u8,               // Log level (0-3)
+    pub record_tick_pnl: bool,       // Record P&L at every tick
+    pub record_fills: bool,          // Record all fill events
+    pub record_orders: bool,         // Record all order events
+    pub snapshot_interval: usize,    // Metrics snapshot frequency
+}
+```
+
+### Default Output Settings
+
+```toml
+verbosity = 1              # Basic logging
+record_tick_pnl = false    # Disabled for performance
+record_fills = true        # Keep fill history
+record_orders = true       # Keep order history
+snapshot_interval = 10000  # Snapshot every 10k events
+```
+
+<Warning>
+Enabling `record_tick_pnl = true` can significantly impact performance and memory usage for high-frequency strategies.
+</Warning>
+
+## Example Configuration
+
+### TOML Format
+
+Create a `backtest_config.toml` file:
+
+```toml
+initial_capital = 1_000_000.0
+
+[latency]
+order_latency_ns = 100_000
+market_data_latency_ns = 50_000
+ack_latency_ns = 120_000
+jitter_ns = 10_000
+use_random_jitter = true
+
+[fees]
+maker_fee = 0.25
+taker_fee = 0.85
+exchange_fee = 0.10
+clearing_fee = 0.02
+
+[risk]
+max_position = 50
+max_order_size = 10
+max_drawdown_pct = 0.05
+max_daily_loss = 100_000.0
+max_open_orders = 20
+enable_kill_switch = true
+
+[execution]
+track_queue_position = true
+fill_probability_decay = 0.9
+partial_fill_probability = 0.2
+min_partial_fill = 1
+simulate_adverse_selection = true
+adverse_selection_prob = 0.1
+
+[output]
+verbosity = 1
+record_tick_pnl = false
+record_fills = true
+record_orders = true
+snapshot_interval = 10000
+```
+
+### Rust API
+
+```rust
+use nano_backtest::BacktestConfig;
+
+// Use default configuration
+let config = BacktestConfig::default();
+
+// Use preset
+let config = BacktestConfig::aggressive_hft();
+let config = BacktestConfig::conservative();
+
+// Custom configuration
+let config = BacktestConfig {
+    initial_capital: 500_000.0,
+    latency: LatencyConfig {
+        order_latency_ns: 75_000,
+        market_data_latency_ns: 25_000,
+        ack_latency_ns: 100_000,
+        jitter_ns: 15_000,
+        use_random_jitter: true,
+    },
+    fees: FeeConfig::default(),
+    risk: RiskConfig {
+        max_position: 30,
+        max_drawdown_pct: 0.03,
+        ..Default::default()
+    },
+    execution: ExecutionConfig::default(),
+    output: OutputConfig::default(),
+};
+```
+
+## Configuration Presets
+
+Two built-in presets are available:
+
+### Aggressive HFT (`config.rs:45-69`)
+
+Optimized for sub-millisecond strategies:
+- Ultra-low latency (50μs orders)
+- Tight risk limits (50 max position)
+- Realistic fill simulation
+
+```rust
+let config = BacktestConfig::aggressive_hft();
+```
+
+### Conservative (`config.rs:71-100`)
+
+Optimized for strategy validation:
+- Higher latency (200μs orders)
+- Buffered fees (1.2x CME rates)
+- Conservative fill model (70% decay)
+- Tighter drawdown limit (3%)
+
+```rust
+let config = BacktestConfig::conservative();
+```
+
+## Related
+
+- [Running Backtests](/backtesting/running-backtests) - Execute backtests with your configuration
+- [Performance Metrics](/backtesting/performance-metrics) - Interpret backtest results
+- [Risk Management](/core/risk-management) - Risk control implementation details

@@ -1,0 +1,340 @@
+---
+title: "Strategy Trait"
+description: "Core Strategy trait and lifecycle management for building trading strategies"
+---
+
+## Overview
+
+The `Strategy` trait is the core abstraction for all trading strategies in NanoARB. It defines the lifecycle hooks for responding to market events, managing positions, and generating orders.
+
+## The Strategy Trait
+
+All strategies must implement the `Strategy` trait from `nano-core`:
+
+```rust
+pub trait Strategy: Send + Sync {
+    /// Strategy name for logging and metrics
+    fn name(&self) -> &str;
+
+    /// Called on each market data update
+    fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order>;
+
+    /// Called when an order is filled
+    fn on_fill(&mut self, fill: &Fill);
+
+    /// Called when an order is acknowledged
+    fn on_order_ack(&mut self, order_id: OrderId);
+
+    /// Called when an order is rejected
+    fn on_order_reject(&mut self, order_id: OrderId, reason: &str);
+
+    /// Called when an order is cancelled
+    fn on_order_cancel(&mut self, order_id: OrderId);
+
+    /// Get current position
+    fn position(&self) -> i64;
+
+    /// Get current P&L
+    fn pnl(&self) -> f64;
+
+    /// Check if strategy is ready to trade
+    fn is_ready(&self) -> bool;
+
+    /// Reset strategy state
+    fn reset(&mut self);
+}
+```
+
+### Source Location
+
+The trait definition is in `nano-core/src/traits.rs:48-78`.
+
+## Strategy Lifecycle
+
+Strategies follow a standard lifecycle:
+
+1. **Initialization** - Strategy is created with configuration
+2. **Ready** - Strategy is ready to trade
+3. **Trading** - Strategy actively generates orders
+4. **Paused** - Strategy stops trading but maintains state
+5. **Stopped** - Strategy is terminated
+6. **Error** - Strategy encountered an error
+
+### Strategy State
+
+The `StrategyState` enum tracks the current lifecycle state:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrategyState {
+    /// Strategy is initializing
+    Initializing,
+    /// Strategy is ready to trade
+    Ready,
+    /// Strategy is actively trading
+    Trading,
+    /// Strategy is paused
+    Paused,
+    /// Strategy is stopped
+    Stopped,
+    /// Strategy encountered an error
+    Error,
+}
+```
+
+**Location:** `nano-strategy/src/base.rs:8-22`
+
+## BaseStrategy
+
+The `BaseStrategy` struct provides common functionality that all strategies can use:
+
+```rust
+pub struct BaseStrategy {
+    name: String,
+    state: StrategyState,
+    position: i64,
+    realized_pnl: f64,
+    unrealized_pnl: f64,
+    total_fees: f64,
+    avg_entry_price: i64,
+    fill_count: u32,
+    round_trips: u32,
+    last_mid: Option<Price>,
+    tick_value: f64,
+}
+```
+
+**Location:** `nano-strategy/src/base.rs:24-48`
+
+### Key Features
+
+- **Position Tracking** - Automatically tracks position size and direction
+- **P&L Calculation** - Computes realized and unrealized P&L
+- **Fee Tracking** - Tracks total fees paid
+- **Round Trip Counting** - Counts complete round trips
+- **State Management** - Manages strategy lifecycle state
+
+## Minimal Strategy Example
+
+Here's a minimal strategy implementation using `BaseStrategy`:
+
+```rust
+use nano_core::traits::{OrderBook, Strategy};
+use nano_core::types::{Fill, Order, OrderId, Price};
+use nano_strategy::{BaseStrategy, StrategyState};
+
+pub struct SimpleStrategy {
+    base: BaseStrategy,
+}
+
+impl SimpleStrategy {
+    pub fn new(name: &str, tick_value: f64) -> Self {
+        let mut base = BaseStrategy::new(name, tick_value);
+        base.set_state(StrategyState::Ready);
+        Self { base }
+    }
+}
+
+impl Strategy for SimpleStrategy {
+    fn name(&self) -> &str {
+        self.base.name()
+    }
+
+    fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order> {
+        // Update base strategy with new market data
+        self.base.on_market_data(book);
+
+        // Your strategy logic here
+        // Return orders to submit
+        Vec::new()
+    }
+
+    fn on_fill(&mut self, fill: &Fill) {
+        // Delegate to base for position tracking
+        self.base.on_fill(fill);
+    }
+
+    fn on_order_ack(&mut self, order_id: OrderId) {
+        // Handle order acknowledgment
+    }
+
+    fn on_order_reject(&mut self, order_id: OrderId, reason: &str) {
+        tracing::warn!("Order {} rejected: {}", order_id, reason);
+    }
+
+    fn on_order_cancel(&mut self, order_id: OrderId) {
+        // Handle order cancellation
+    }
+
+    fn position(&self) -> i64 {
+        self.base.position()
+    }
+
+    fn pnl(&self) -> f64 {
+        self.base.pnl()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.base.is_ready()
+    }
+
+    fn reset(&mut self) {
+        self.base.reset();
+    }
+}
+```
+
+## Position and P&L Management
+
+The `BaseStrategy` automatically handles position and P&L tracking:
+
+### Position Updates
+
+When a fill occurs, `update_position()` is called automatically:
+
+```rust
+pub fn update_position(&mut self, fill: &Fill) {
+    let fill_qty = i64::from(fill.quantity.value());
+    let signed_qty = if fill.side == Side::Buy {
+        fill_qty
+    } else {
+        -fill_qty
+    };
+    let fill_price = fill.price.raw();
+
+    self.fill_count += 1;
+    self.total_fees += fill.fee;
+
+    // Update position and P&L
+    // ...
+}
+```
+
+**Location:** `nano-strategy/src/base.rs:80-132`
+
+### P&L Calculation
+
+- **Realized P&L** - Profit/loss from closed positions
+- **Unrealized P&L** - Mark-to-market P&L on open positions
+- **Net P&L** - Total P&L minus fees
+
+```rust
+pub fn total_pnl(&self) -> f64 {
+    self.realized_pnl + self.unrealized_pnl - self.total_fees
+}
+```
+
+**Location:** `nano-strategy/src/base.rs:147-150`
+
+## Event Handlers
+
+### on_market_data
+
+Called on every market data update. This is where strategies generate new orders:
+
+```rust
+fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order> {
+    // Check if strategy is ready
+    if !self.is_ready() {
+        return Vec::new();
+    }
+
+    // Access market data
+    let mid = book.mid_price()?;
+    let (best_bid, bid_qty) = book.best_bid()?;
+    let (best_ask, ask_qty) = book.best_ask()?;
+
+    // Generate and return orders
+    vec![/* your orders */]
+}
+```
+
+### on_fill
+
+Called when an order is filled:
+
+```rust
+fn on_fill(&mut self, fill: &Fill) {
+    // Update position tracking
+    self.base.on_fill(fill);
+
+    // Your custom fill handling
+    tracing::info!(
+        "Filled {} @ {} for {}",
+        fill.quantity,
+        fill.price,
+        fill.order_id
+    );
+}
+```
+
+### on_order_ack
+
+Called when an order is acknowledged by the exchange:
+
+```rust
+fn on_order_ack(&mut self, order_id: OrderId) {
+    // Remove from pending acknowledgments
+    self.pending_acks.remove(&order_id);
+}
+```
+
+### on_order_reject
+
+Called when an order is rejected:
+
+```rust
+fn on_order_reject(&mut self, order_id: OrderId, reason: &str) {
+    tracing::error!("Order {} rejected: {}", order_id, reason);
+    // Clean up rejected order
+}
+```
+
+## State Management
+
+Control strategy state transitions:
+
+```rust
+use nano_strategy::StrategyState;
+
+// Set strategy state
+strategy.set_state(StrategyState::Trading);
+
+// Check current state
+if strategy.state() == StrategyState::Trading {
+    // Strategy is actively trading
+}
+
+// Check if ready to trade
+if strategy.is_ready() {
+    // Generate orders
+}
+```
+
+## Best Practices
+
+1. **Always delegate to BaseStrategy** - Use `self.base.on_fill(fill)` to ensure position tracking works correctly
+
+2. **Check is_ready()** - Don't generate orders unless the strategy is ready:
+   ```rust
+   if !self.is_ready() {
+       return Vec::new();
+   }
+   ```
+
+3. **Handle all lifecycle events** - Implement all trait methods, even if they're empty
+
+4. **Reset properly** - Call `self.base.reset()` in your reset implementation
+
+5. **Use state transitions** - Move through states logically: Initializing → Ready → Trading
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Market Making" icon="chart-line" href="/strategies/market-making">
+    Build market-making strategies with quote management
+  </Card>
+  <Card title="Signal Generation" icon="signal" href="/strategies/signal-generation">
+    Create signal-based trading strategies
+  </Card>
+</CardGroup>

@@ -1,0 +1,637 @@
+---
+title: "Reinforcement Learning Strategies"
+description: "Train and deploy RL agents for market making with IQL and Decision Transformer"
+---
+
+## Overview
+
+NanoARB provides a complete RL environment for training market-making agents using:
+
+- **Gym-style environment** for market making
+- **State representations** from order book data
+- **Action spaces** for quote placement
+- **Reward functions** for profit optimization
+- Support for **IQL** and **Decision Transformer** algorithms
+
+## MarketMakingEnv
+
+The RL environment simulates market-making dynamics:
+
+```rust
+pub struct MarketMakingEnv {
+    config: EnvConfig,
+    inventory: i64,
+    pnl: f64,
+    unrealized_pnl: f64,
+    total_fees: f64,
+    avg_entry_price: f64,
+    step_count: usize,
+    last_action: Option<MarketMakingAction>,
+    snapshot_buffer: SnapshotRingBuffer,
+    recent_mids: Vec<f64>,
+    last_trade_time: Timestamp,
+    done: bool,
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:160-186`
+
+### Creating an Environment
+
+```rust
+use nano_strategy::rl_env::{MarketMakingEnv, EnvConfig};
+
+let config = EnvConfig {
+    max_inventory: 50,
+    max_order_size: 10,
+    tick_size: 0.25,
+    tick_value: 12.5,
+    maker_fee: 0.25,
+    taker_fee: 0.85,
+    lambda_inventory: 0.001,
+    lambda_adverse: 0.0005,
+    lambda_spread: 0.0001,
+    episode_length: 10000,
+    observation_window: 100,
+};
+
+let mut env = MarketMakingEnv::new(config);
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:188-207`
+
+## Environment Configuration
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvConfig {
+    /// Maximum inventory
+    pub max_inventory: i64,
+    /// Maximum order size
+    pub max_order_size: u32,
+    /// Tick size
+    pub tick_size: f64,
+    /// Tick value (P&L per tick per contract)
+    pub tick_value: f64,
+    /// Maker fee
+    pub maker_fee: f64,
+    /// Taker fee
+    pub taker_fee: f64,
+    /// Inventory penalty coefficient
+    pub lambda_inventory: f64,
+    /// Adverse selection penalty coefficient
+    pub lambda_adverse: f64,
+    /// Spread penalty coefficient
+    pub lambda_spread: f64,
+    /// Episode length (number of steps)
+    pub episode_length: usize,
+    /// Observation window (number of snapshots)
+    pub observation_window: usize,
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:115-140`
+
+### Default Configuration
+
+```rust
+impl Default for EnvConfig {
+    fn default() -> Self {
+        Self {
+            max_inventory: 50,
+            max_order_size: 10,
+            tick_size: 0.25,
+            tick_value: 12.5,
+            maker_fee: 0.25,
+            taker_fee: 0.85,
+            lambda_inventory: 0.001,
+            lambda_adverse: 0.0005,
+            lambda_spread: 0.0001,
+            episode_length: 10000,
+            observation_window: 100,
+        }
+    }
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:142-158`
+
+## Action Space
+
+Actions control quote placement:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketMakingAction {
+    /// Bid price skew from mid (-1 to +1, in units of base spread)
+    pub bid_skew: f64,
+    /// Ask price skew from mid (-1 to +1, in units of base spread)
+    pub ask_skew: f64,
+    /// Spread width (in ticks)
+    pub spread: f64,
+    /// Bid size (as fraction of max)
+    pub bid_size: f64,
+    /// Ask size (as fraction of max)
+    pub ask_size: f64,
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:8-21`
+
+### Creating Actions
+
+```rust
+use nano_strategy::rl_env::MarketMakingAction;
+
+// From neural network output
+let nn_output = vec![0.2, -0.3, 2.0, 0.8, 0.7];
+let action = MarketMakingAction::from_array(&nn_output);
+
+// Manual construction
+let action = MarketMakingAction {
+    bid_skew: 0.1,    // Slightly aggressive bid
+    ask_skew: -0.2,   // More aggressive ask
+    spread: 2.5,      // 2.5 tick spread
+    bid_size: 1.0,    // Full size on bid
+    ask_size: 0.8,    // 80% size on ask
+};
+
+// Convert to array for NN input
+let array = action.to_array();
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:36-58`
+
+### Action Validation
+
+```rust
+pub fn is_valid(&self) -> bool {
+    self.bid_skew >= -1.0
+        && self.bid_skew <= 1.0
+        && self.ask_skew >= -1.0
+        && self.ask_skew <= 1.0
+        && self.spread > 0.0
+        && self.bid_size >= 0.0
+        && self.bid_size <= 1.0
+        && self.ask_size >= 0.0
+        && self.ask_size <= 1.0
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:60-72`
+
+## State Space
+
+The state representation includes:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct MarketMakingState {
+    /// LOB features (flattened)
+    pub lob_features: Vec<f32>,
+    /// Current inventory (normalized)
+    pub inventory: f32,
+    /// Unrealized P&L (normalized)
+    pub unrealized_pnl: f32,
+    /// Time since last trade (normalized)
+    pub time_since_trade: f32,
+    /// Spread (in ticks)
+    pub spread: f32,
+    /// Book imbalance
+    pub imbalance: f32,
+    /// Recent returns
+    pub recent_returns: Vec<f32>,
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:75-92`
+
+### State Features
+
+1. **LOB features** - Flattened order book snapshot (prices, quantities, depths)
+2. **Inventory** - Current position normalized by max_inventory
+3. **Unrealized P&L** - Mark-to-market P&L
+4. **Time since trade** - Normalized time since last fill
+5. **Spread** - Current bid-ask spread
+6. **Imbalance** - Order book imbalance
+7. **Recent returns** - Last N price returns
+
+### Converting State to Array
+
+```rust
+pub fn to_array(&self) -> Vec<f32> {
+    let mut arr = self.lob_features.clone();
+    arr.push(self.inventory);
+    arr.push(self.unrealized_pnl);
+    arr.push(self.time_since_trade);
+    arr.push(self.spread);
+    arr.push(self.imbalance);
+    arr.extend(&self.recent_returns);
+    arr
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:95-106`
+
+## Reward Function
+
+The reward balances multiple objectives:
+
+```rust
+fn calculate_reward(
+    &self,
+    fills: Vec<(Side, f64, u32)>,
+    adverse_selection_cost: f64,
+    action: &MarketMakingAction,
+) -> f64 {
+    let mut reward = 0.0;
+
+    // P&L from fills (spread capture)
+    for (side, price, qty) in &fills {
+        let half_spread = action.spread * self.config.tick_size / 2.0;
+        let edge = half_spread / self.config.tick_size * self.config.tick_value;
+        reward += edge * f64::from(*qty);
+    }
+
+    // Inventory penalty (quadratic)
+    let inv_penalty = self.config.lambda_inventory
+        * (self.inventory as f64 / self.config.max_inventory as f64).powi(2);
+    reward -= inv_penalty;
+
+    // Adverse selection penalty
+    reward -= self.config.lambda_adverse * adverse_selection_cost;
+
+    // Fee cost
+    if !fills.is_empty() {
+        let fee_cost: f64 = fills
+            .iter()
+            .map(|(_, _, q)| self.config.maker_fee * f64::from(*q))
+            .sum();
+        reward -= fee_cost;
+    }
+
+    reward
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:388-422`
+
+### Reward Components
+
+1. **Spread Capture** - Positive reward for fills that capture spread
+2. **Inventory Penalty** - Quadratic penalty for large positions
+3. **Adverse Selection** - Penalty when market moves against position
+4. **Fee Costs** - Maker/taker fees reduce reward
+
+### Tuning Reward Coefficients
+
+```rust
+let config = EnvConfig {
+    // Higher inventory penalty → agent stays more neutral
+    lambda_inventory: 0.002,  // Default: 0.001
+
+    // Higher adverse penalty → agent quotes wider spreads
+    lambda_adverse: 0.001,    // Default: 0.0005
+
+    // Spread penalty → encourages tighter quotes
+    lambda_spread: 0.0002,    // Default: 0.0001
+
+    ..Default::default()
+};
+```
+
+## Training Loop
+
+Standard RL training loop:
+
+```rust
+use nano_strategy::rl_env::{MarketMakingEnv, MarketMakingAction};
+
+// Create environment
+let mut env = MarketMakingEnv::new(EnvConfig::default());
+
+// Training loop
+for episode in 0..num_episodes {
+    let mut state = env.reset();
+    let mut episode_reward = 0.0;
+
+    while !env.is_done() {
+        // Get action from agent
+        let state_array = state.to_array();
+        let action_array = agent.select_action(&state_array);
+        let action = MarketMakingAction::from_array(&action_array);
+
+        // Take step in environment
+        let (next_state, reward, done) = env.step(action, &book);
+
+        // Store transition for training
+        replay_buffer.push(state, action, reward, next_state, done);
+
+        // Train agent
+        if replay_buffer.len() >= batch_size {
+            let batch = replay_buffer.sample(batch_size);
+            let loss = agent.train_step(&batch);
+        }
+
+        episode_reward += reward;
+        state = next_state;
+    }
+
+    println!("Episode {}: reward = {:.2}, P&L = ${:.2}",
+             episode, episode_reward, env.total_pnl());
+}
+```
+
+## Environment API
+
+### reset
+
+```rust
+pub fn reset(&mut self) -> MarketMakingState {
+    self.inventory = 0;
+    self.pnl = 0.0;
+    self.unrealized_pnl = 0.0;
+    self.total_fees = 0.0;
+    self.avg_entry_price = 0.0;
+    self.step_count = 0;
+    self.last_action = None;
+    self.snapshot_buffer.clear();
+    self.recent_mids.clear();
+    self.done = false;
+
+    self.get_state()
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:209-223`
+
+### step
+
+```rust
+pub fn step(
+    &mut self,
+    action: MarketMakingAction,
+    book: &OrderBook,
+) -> (MarketMakingState, f64, bool) {
+    self.step_count += 1;
+
+    // Update snapshot buffer
+    self.snapshot_buffer.push_book(book);
+
+    // Simulate trading
+    let (fills, adverse_cost) = self.simulate_fills(&action, book);
+
+    // Calculate reward
+    let reward = self.calculate_reward(fills, adverse_cost, &action);
+
+    // Update state
+    self.last_action = Some(action);
+
+    // Check termination
+    if self.step_count >= self.config.episode_length {
+        self.done = true;
+    }
+
+    if self.inventory.abs() > self.config.max_inventory {
+        self.done = true;
+    }
+
+    let state = self.get_state();
+    (state, reward, self.done)
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:225-264`
+
+## Fill Simulation
+
+The environment simulates realistic fills:
+
+```rust
+fn simulate_fills(
+    &mut self,
+    action: &MarketMakingAction,
+    book: &OrderBook,
+) -> (Vec<(Side, f64, u32)>, f64) {
+    let mut fills = Vec::new();
+    let mut adverse_cost = 0.0;
+
+    let mid = match book.mid_price() {
+        Some(m) => m.as_f64(),
+        None => return (fills, adverse_cost),
+    };
+
+    // Calculate quote prices
+    let bid_price = mid - action.spread * self.config.tick_size / 2.0
+        + action.bid_skew * self.config.tick_size;
+    let ask_price = mid
+        + action.spread * self.config.tick_size / 2.0
+        + action.ask_skew * self.config.tick_size;
+
+    // Probability of fill based on quote aggressiveness
+    let bid_fill_prob = 0.1 * (1.0 - action.bid_skew.abs());
+    let ask_fill_prob = 0.1 * (1.0 - action.ask_skew.abs());
+
+    // Simulate fills with random sampling
+    // ...
+
+    (fills, adverse_cost)
+}
+```
+
+**Location:** `nano-strategy/src/rl_env.rs:266-325`
+
+## IQL Training
+
+Implicit Q-Learning for offline RL:
+
+```rust
+use nano_strategy::rl_env::{MarketMakingEnv, MarketMakingAction, MarketMakingState};
+
+struct IQLAgent {
+    q_network: QNetwork,
+    value_network: ValueNetwork,
+    policy_network: PolicyNetwork,
+    tau: f64,  // Temperature for advantage weighting
+    beta: f64, // Discount factor
+}
+
+impl IQLAgent {
+    fn train_step(&mut self, batch: &Batch) -> f64 {
+        // Train value network
+        let value_loss = self.train_value(&batch);
+
+        // Train Q-network
+        let q_loss = self.train_q(&batch);
+
+        // Train policy with advantage weighting
+        let policy_loss = self.train_policy(&batch);
+
+        value_loss + q_loss + policy_loss
+    }
+
+    fn train_value(&mut self, batch: &Batch) -> f64 {
+        // V(s) <- expectile of Q(s,a)
+        let q_values = self.q_network.forward(&batch.states, &batch.actions);
+        let v_values = self.value_network.forward(&batch.states);
+
+        let td_errors = q_values - v_values;
+        let weights = (td_errors > 0.0).float() * self.tau
+            + (td_errors <= 0.0).float() * (1.0 - self.tau);
+
+        (weights * td_errors.pow(2)).mean()
+    }
+
+    fn train_q(&mut self, batch: &Batch) -> f64 {
+        // Q(s,a) <- r + γV(s')
+        let next_values = self.value_network.forward(&batch.next_states);
+        let targets = batch.rewards + self.beta * next_values * (1.0 - batch.dones);
+        let predictions = self.q_network.forward(&batch.states, &batch.actions);
+
+        (predictions - targets).pow(2).mean()
+    }
+
+    fn train_policy(&mut self, batch: &Batch) -> f64 {
+        // π(a|s) <- exp(β * A(s,a))
+        let q_values = self.q_network.forward(&batch.states, &batch.actions);
+        let v_values = self.value_network.forward(&batch.states);
+        let advantages = q_values - v_values;
+
+        let log_probs = self.policy_network.log_prob(&batch.states, &batch.actions);
+        let weights = (self.beta * advantages).exp().clamp(0.0, 100.0);
+
+        -(weights * log_probs).mean()
+    }
+}
+```
+
+## Decision Transformer
+
+Sequence modeling approach to RL:
+
+```rust
+struct DecisionTransformer {
+    transformer: TransformerModel,
+    context_length: usize,
+    state_dim: usize,
+    action_dim: usize,
+}
+
+impl DecisionTransformer {
+    fn select_action(
+        &self,
+        states: &[MarketMakingState],
+        actions: &[MarketMakingAction],
+        returns_to_go: &[f64],
+    ) -> MarketMakingAction {
+        // Build input sequence
+        let mut input_seq = Vec::new();
+        for i in 0..states.len() {
+            input_seq.push(returns_to_go[i]);
+            input_seq.push(states[i].to_array());
+            if i < actions.len() {
+                input_seq.push(actions[i].to_array());
+            }
+        }
+
+        // Run transformer
+        let output = self.transformer.forward(&input_seq);
+
+        // Extract action prediction
+        let action_output = &output[output.len() - self.action_dim..];
+        MarketMakingAction::from_array(action_output)
+    }
+
+    fn train_step(&mut self, trajectories: &[Trajectory]) -> f64 {
+        let mut loss = 0.0;
+
+        for traj in trajectories {
+            // Calculate returns-to-go
+            let returns_to_go = self.calculate_rtg(traj);
+
+            // Build input sequence
+            let input_seq = self.build_sequence(traj, &returns_to_go);
+
+            // Forward pass
+            let predictions = self.transformer.forward(&input_seq);
+
+            // Extract action predictions
+            let action_preds = self.extract_action_predictions(&predictions);
+
+            // Compute loss
+            loss += (action_preds - traj.actions).pow(2).mean();
+        }
+
+        loss / trajectories.len() as f64
+    }
+}
+```
+
+## Deployment
+
+Deploy trained RL agent:
+
+```rust
+use nano_strategy::rl_env::{MarketMakingAction, MarketMakingState};
+use nano_core::traits::{Strategy, OrderBook};
+
+pub struct RLStrategy {
+    agent: Box<dyn RLAgent>,
+    state_buffer: Vec<MarketMakingState>,
+    context_length: usize,
+    instrument_id: u32,
+}
+
+impl Strategy for RLStrategy {
+    fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order> {
+        // Extract state
+        let state = self.extract_state(book);
+        self.state_buffer.push(state);
+
+        // Keep only recent context
+        if self.state_buffer.len() > self.context_length {
+            self.state_buffer.remove(0);
+        }
+
+        // Get action from agent
+        let action = self.agent.select_action(&self.state_buffer);
+
+        // Convert action to orders
+        self.action_to_orders(action, book)
+    }
+
+    // ... other trait methods
+}
+```
+
+## Best Practices
+
+1. **Start with imitation learning** - Pre-train on data from profitable strategies
+
+2. **Tune reward coefficients** - Balance spread capture vs inventory risk:
+   ```rust
+   lambda_inventory: 0.001,  // Higher = more conservative
+   lambda_adverse: 0.0005,   // Higher = wider spreads
+   ```
+
+3. **Use sufficient context** - Include enough history for informed decisions:
+   ```rust
+   observation_window: 100,  // Last 100 order book snapshots
+   ```
+
+4. **Normalize state features** - Ensure all features are on similar scales
+
+5. **Monitor out-of-distribution** - Track when live conditions differ from training
+
+6. **Use offline RL for safety** - Train on historical data before live deployment
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Strategy Trait" icon="code" href="/strategies/strategy-trait">
+    Understand the core Strategy trait
+  </Card>
+  <Card title="Market Making" icon="chart-line" href="/strategies/market-making">
+    Combine RL with traditional market making
+  </Card>
+</CardGroup>

@@ -1,0 +1,306 @@
+---
+title: "BacktestEngine"
+description: "Core backtest engine for simulating trading strategies with realistic market conditions"
+---
+
+## Overview
+
+The `BacktestEngine` is the main component for running strategy backtests. It processes market data events, manages order execution, tracks positions, enforces risk limits, and calculates performance metrics.
+
+Source: `nano-backtest/src/engine.rs`
+
+## Constructor
+
+### `new`
+
+Creates a new backtest engine with the specified configuration.
+
+```rust
+pub fn new(config: BacktestConfig) -> Self
+```
+
+**Parameters:**
+- `config`: `BacktestConfig` - Configuration including latency, fees, risk, and execution settings
+
+**Returns:** A new `BacktestEngine` instance in the `Ready` state
+
+**Example:**
+```rust
+use nano_backtest::{BacktestConfig, BacktestEngine};
+
+let config = BacktestConfig::default();
+let engine = BacktestEngine::new(config);
+```
+
+## State Management
+
+### Engine States
+
+The engine progresses through the following states:
+
+```rust
+pub enum EngineState {
+    Ready,      // Engine is ready to run
+    Running,    // Engine is running
+    Paused,     // Engine is paused
+    Completed,  // Engine has completed
+    Stopped,    // Engine was stopped due to error or risk breach
+}
+```
+
+### `state`
+
+Returns the current engine state.
+
+```rust
+pub fn state(&self) -> EngineState
+```
+
+## Instrument Registration
+
+### `register_instrument`
+
+Registers an instrument for trading in the backtest.
+
+```rust
+pub fn register_instrument(&mut self, instrument: Instrument)
+```
+
+**Parameters:**
+- `instrument`: `Instrument` - The instrument to register
+
+**Details:**
+- Creates an order book for the instrument
+- Initializes position tracking
+- Required before processing market data for the instrument
+
+**Example:**
+```rust
+let instrument = Instrument::es_future(1, "ESH24");
+engine.register_instrument(instrument);
+```
+
+## Running the Backtest
+
+### `run`
+
+Runs the complete backtest with a strategy.
+
+```rust
+pub fn run<S: Strategy>(&mut self, strategy: &mut S)
+```
+
+**Parameters:**
+- `strategy`: `&mut S` - Mutable reference to a strategy implementing the `Strategy` trait
+
+**Details:**
+- Processes all events in the event queue
+- Updates metrics and statistics continuously
+- Stops when queue is empty or risk limits are breached
+- Transitions to `Completed` or `Stopped` state
+
+**Example:**
+```rust
+use nano_core::traits::Strategy;
+
+let mut my_strategy = MyStrategy::new();
+engine.run(&mut my_strategy);
+
+// Check results
+let metrics = engine.metrics();
+println!("Total P&L: ${:.2}", metrics.total_pnl);
+```
+
+### `run_n`
+
+Runs the backtest for a limited number of events.
+
+```rust
+pub fn run_n<S: Strategy>(&mut self, strategy: &mut S, max_events: usize) -> usize
+```
+
+**Parameters:**
+- `strategy`: `&mut S` - Mutable reference to a strategy
+- `max_events`: `usize` - Maximum number of events to process
+
+**Returns:** Number of events actually processed
+
+**Use case:** Step-through debugging or incremental processing
+
+## Event Processing
+
+### `schedule_event`
+
+Schedules an event to be processed at a specific timestamp.
+
+```rust
+pub fn schedule_event(&mut self, timestamp: Timestamp, event_type: EventType)
+```
+
+**Parameters:**
+- `timestamp`: `Timestamp` - When the event should occur
+- `event_type`: `EventType` - Type of event (market data, order submit, fill, etc.)
+
+### `process_event`
+
+Processes a single event from the queue.
+
+```rust
+pub fn process_event<S: Strategy>(&mut self, event: Event, strategy: &mut S)
+```
+
+**Event types handled:**
+- `MarketData` - Triggers strategy's `on_market_data` callback
+- `OrderSubmit` - Submits order to simulated exchange
+- `OrderAck` - Notifies strategy of order acknowledgment
+- `OrderFill` - Applies fill to position and notifies strategy
+- `OrderCancel` - Notifies strategy of cancellation
+- `OrderReject` - Notifies strategy of rejection
+- `EndOfData` - Marks backtest completion
+
+## Order Book Access
+
+### `get_book`
+
+Gets an immutable reference to an instrument's order book.
+
+```rust
+pub fn get_book(&self, instrument_id: u32) -> Option<&OrderBook>
+```
+
+### `get_book_mut`
+
+Gets a mutable reference to an instrument's order book.
+
+```rust
+pub fn get_book_mut(&mut self, instrument_id: u32) -> Option<&mut OrderBook>
+```
+
+## Metrics and Statistics
+
+### `metrics`
+
+Returns reference to performance metrics.
+
+```rust
+pub fn metrics(&self) -> &BacktestMetrics
+```
+
+**Includes:**
+- Total/realized/unrealized P&L
+- Trade counts and win rate
+- Drawdown statistics
+- Volume and fill statistics
+
+See [BacktestMetrics](/api/backtest/metrics) for details.
+
+### `stats`
+
+Returns reference to detailed performance statistics.
+
+```rust
+pub fn stats(&self) -> &PerformanceStats
+```
+
+**Includes:**
+- Sharpe and Sortino ratios
+- Equity curve
+- Daily returns
+- Consecutive win/loss tracking
+
+### `positions`
+
+Returns reference to the position tracker.
+
+```rust
+pub fn positions(&self) -> &PositionTracker
+```
+
+### `risk`
+
+Returns reference to the risk manager.
+
+```rust
+pub fn risk(&self) -> &RiskManager
+```
+
+## Status Information
+
+### `current_time`
+
+Returns the current simulation timestamp.
+
+```rust
+pub fn current_time(&self) -> Timestamp
+```
+
+### `events_processed`
+
+Returns the number of events processed.
+
+```rust
+pub fn events_processed(&self) -> u64
+```
+
+### `pending_events`
+
+Returns the number of events remaining in the queue.
+
+```rust
+pub fn pending_events(&self) -> usize
+```
+
+## Reset
+
+### `reset`
+
+Resets the engine to initial state for a new backtest run.
+
+```rust
+pub fn reset(&mut self)
+```
+
+**Resets:**
+- Event queue
+- Exchange simulator
+- Positions and P&L
+- Metrics and statistics
+- Order books (cleared but not removed)
+- State to `Ready`
+
+## Complete Example
+
+```rust
+use nano_backtest::{BacktestConfig, BacktestEngine};
+use nano_core::types::Instrument;
+
+// Create engine with configuration
+let config = BacktestConfig::aggressive_hft();
+let mut engine = BacktestEngine::new(config);
+
+// Register instruments
+let es_future = Instrument::es_future(1, "ESH24");
+engine.register_instrument(es_future);
+
+// Load market data and schedule events
+// ... (populate event queue with market data)
+
+// Run backtest
+let mut strategy = MyHFTStrategy::new();
+engine.run(&mut strategy);
+
+// Analyze results
+let metrics = engine.metrics();
+let stats = engine.stats();
+
+println!("P&L: ${:.2}", metrics.total_pnl);
+println!("Sharpe Ratio: {:.2}", stats.sharpe_ratio);
+println!("Max Drawdown: {:.2}%", metrics.max_drawdown_pct * 100.0);
+println!("Win Rate: {:.2}%", metrics.win_rate() * 100.0);
+```
+
+## See Also
+
+- [BacktestConfig](/api/backtest/config) - Configuration options
+- [PerformanceMetrics](/api/backtest/metrics) - Performance tracking
+- [Strategy Trait](/api/core/strategy) - Strategy interface

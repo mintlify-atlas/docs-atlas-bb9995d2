@@ -1,0 +1,503 @@
+---
+title: Running Backtests
+description: Execute backtests via Rust API, load market data, and interpret results
+---
+
+The NanoARB backtesting engine uses an event-driven architecture to simulate realistic trading with configurable latency, fills, and risk management.
+
+## Quick Start
+
+### Basic Backtest Example
+
+```rust
+use nano_backtest::{BacktestConfig, BacktestEngine};
+use nano_core::traits::Strategy;
+
+// Create configuration
+let config = BacktestConfig::default();
+let mut engine = BacktestEngine::new(config);
+
+// Register instruments
+let instrument = Instrument::es_future(1, "ESH24");
+engine.register_instrument(instrument);
+
+// Load market data and schedule events
+load_market_data(&mut engine, "data/es_20240115.bin");
+
+// Run backtest with your strategy
+let mut strategy = MyStrategy::new();
+engine.run(&mut strategy);
+
+// Get results
+let metrics = engine.metrics();
+println!("Total P&L: ${:.2}", metrics.total_pnl);
+println!("Sharpe Ratio: {:.2}", engine.stats().sharpe_ratio);
+```
+
+## Backtest Engine Architecture
+
+The engine is defined in `nano-backtest/src/engine.rs:33-64`.
+
+### Engine Components
+
+| Component | Purpose |
+|-----------|----------|
+| **EventQueue** | Priority queue for time-ordered event processing |
+| **SimulatedExchange** | Order matching and fill simulation |
+| **LatencySimulator** | Network and exchange latency modeling |
+| **PositionTracker** | Real-time P&L and position tracking |
+| **RiskManager** | Pre-trade and real-time risk checks |
+| **MetricsCollector** | Performance statistics and analytics |
+
+### Event-Driven Workflow
+
+The backtest processes events in chronological order (`engine.rs:260-276`):
+
+```rust
+while !engine.event_queue.is_empty() {
+    let event = engine.event_queue.pop();
+    engine.process_event(event, &mut strategy);
+}
+```
+
+## Event Processing
+
+### Event Types
+
+From `events.rs:10-76`, the engine processes:
+
+| Event Type | Description | Triggered By |
+|------------|-------------|-------------|
+| **MarketData** | Order book update | Market data feed |
+| **OrderSubmit** | Order arrives at exchange | Strategy + latency |
+| **OrderAck** | Exchange confirms order | Exchange + ack latency |
+| **OrderFill** | Order execution | Exchange matching |
+| **OrderCancel** | Cancel confirmation | Strategy cancel request |
+| **OrderReject** | Order rejected | Risk checks or exchange |
+| **Timer** | Scheduled callback | Strategy timers |
+| **Signal** | Inter-strategy signal | Strategy signals |
+| **EndOfData** | Backtest complete | Data exhaustion |
+
+### Event Flow Example
+
+Market data event → Strategy decision → Order submission:
+
+```
+1. MarketData event (t=0)
+   ↓ market_data_latency_ns
+2. Strategy sees update (t=50μs)
+   ↓ strategy computation
+3. Strategy submits order (t=52μs)
+   ↓ order_latency_ns
+4. OrderSubmit arrives at exchange (t=152μs)
+   ↓ exchange processing
+5. OrderAck sent (t=154μs)
+   ↓ ack_latency_ns
+6. Strategy receives ack (t=254μs)
+```
+
+## Engine API
+
+### Creating an Engine
+
+```rust
+use nano_backtest::{BacktestConfig, BacktestEngine};
+
+// Default configuration
+let mut engine = BacktestEngine::new(BacktestConfig::default());
+
+// Aggressive HFT preset
+let mut engine = BacktestEngine::new(BacktestConfig::aggressive_hft());
+
+// Custom configuration
+let config = BacktestConfig {
+    initial_capital: 500_000.0,
+    latency: LatencyConfig { /* ... */ },
+    // ... other config
+};
+let mut engine = BacktestEngine::new(config);
+```
+
+### Registering Instruments
+
+From `engine.rs:94-99`:
+
+```rust
+use nano_core::types::Instrument;
+
+// Register E-mini S&P 500 futures
+let es = Instrument::es_future(1, "ESH24");
+engine.register_instrument(es);
+
+// Register multiple instruments
+let instruments = vec![
+    Instrument::es_future(1, "ESH24"),
+    Instrument::nq_future(2, "NQH24"),
+];
+
+for instrument in instruments {
+    engine.register_instrument(instrument);
+}
+```
+
+### Scheduling Events
+
+From `engine.rs:113-115`:
+
+```rust
+use nano_core::types::Timestamp;
+use nano_backtest::events::EventType;
+
+// Schedule market data event
+let timestamp = Timestamp::from_nanos(1_000_000_000);
+engine.schedule_event(timestamp, EventType::MarketData {
+    instrument_id: 1,
+});
+
+// Using EventQueue methods
+engine.event_queue.schedule_market_data(timestamp, instrument_id);
+engine.event_queue.schedule_timer(timestamp, timer_id, None);
+```
+
+### Running the Backtest
+
+From `engine.rs:260-276`:
+
+```rust
+// Run complete backtest
+engine.run(&mut strategy);
+
+// Run with progress tracking
+let total_events = engine.pending_events();
+while engine.state() == EngineState::Running {
+    let processed = engine.run_n(&mut strategy, 1000);
+    let progress = engine.events_processed() as f64 / total_events as f64;
+    println!("Progress: {:.1}%", progress * 100.0);
+}
+
+// Run until specific time
+while let Some(event) = engine.event_queue.peek() {
+    if event.timestamp > cutoff_time {
+        break;
+    }
+    engine.run_n(&mut strategy, 1);
+}
+```
+
+## Loading Market Data
+
+### From Binary MDP3 Feed
+
+```rust
+use nano_feed::mdp3::MdpDecoder;
+use std::fs::File;
+use std::io::BufReader;
+
+fn load_market_data(engine: &mut BacktestEngine, path: &str) -> Result<()> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut decoder = MdpDecoder::new();
+    
+    let mut sequence = 0u64;
+    
+    while let Some(message) = decoder.decode(&mut reader)? {
+        match message {
+            MdpMessage::BookUpdate(update) => {
+                let timestamp = Timestamp::from_nanos(update.transact_time);
+                engine.schedule_event(
+                    timestamp,
+                    EventType::MarketData {
+                        instrument_id: update.security_id,
+                    },
+                );
+                
+                // Update the order book
+                if let Some(book) = engine.get_book_mut(update.security_id) {
+                    book.apply_book_update(&update);
+                }
+            }
+            _ => {}
+        }
+        sequence += 1;
+    }
+    
+    // Schedule end of data
+    engine.schedule_event(Timestamp::now(), EventType::EndOfData);
+    
+    Ok(())
+}
+```
+
+### From CSV Data
+
+```rust
+use csv::Reader;
+use nano_core::types::{Price, Quantity, Timestamp};
+
+fn load_csv_data(engine: &mut BacktestEngine, path: &str) -> Result<()> {
+    let mut reader = Reader::from_path(path)?;
+    
+    for result in reader.deserialize() {
+        let record: TickRecord = result?;
+        
+        // Create synthetic book update
+        let timestamp = Timestamp::from_nanos(record.timestamp_ns);
+        
+        engine.schedule_event(
+            timestamp,
+            EventType::MarketData {
+                instrument_id: record.instrument_id,
+            },
+        );
+        
+        // Update book with bid/ask
+        if let Some(book) = engine.get_book_mut(record.instrument_id) {
+            update_book_from_tick(book, &record);
+        }
+    }
+    
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct TickRecord {
+    timestamp_ns: i64,
+    instrument_id: u32,
+    bid_price: f64,
+    bid_size: u32,
+    ask_price: f64,
+    ask_size: u32,
+}
+```
+
+## Strategy Integration
+
+Your strategy must implement the `Strategy` trait:
+
+```rust
+use nano_core::traits::Strategy;
+use nano_core::types::{Order, Fill, OrderId};
+use nano_lob::OrderBook;
+
+struct MyStrategy {
+    position: i64,
+    // ... strategy state
+}
+
+impl Strategy for MyStrategy {
+    fn on_market_data(&mut self, book: &OrderBook) -> Vec<Order> {
+        // Analyze market data
+        let (bid, _) = book.best_bid()?;
+        let (ask, _) = book.best_ask()?;
+        let spread = ask.raw() - bid.raw();
+        
+        // Generate orders
+        if spread > self.min_spread {
+            vec![
+                self.create_bid_order(book),
+                self.create_ask_order(book),
+            ]
+        } else {
+            vec![]
+        }
+    }
+    
+    fn on_fill(&mut self, fill: &Fill) {
+        // Update position
+        match fill.side {
+            Side::Buy => self.position += fill.quantity.value() as i64,
+            Side::Sell => self.position -= fill.quantity.value() as i64,
+        }
+        
+        // Update P&L
+        self.realized_pnl += self.calculate_fill_pnl(fill);
+    }
+    
+    fn on_order_ack(&mut self, order_id: OrderId) {
+        // Order confirmed by exchange
+        self.active_orders.insert(order_id);
+    }
+    
+    fn on_order_reject(&mut self, order_id: OrderId, reason: &str) {
+        // Handle rejection
+        tracing::warn!("Order {} rejected: {}", order_id, reason);
+    }
+    
+    fn position(&self) -> i64 {
+        self.position
+    }
+}
+```
+
+## Accessing Results
+
+From `engine.rs:319-348`:
+
+```rust
+// Get basic metrics
+let metrics = engine.metrics();
+println!("Total P&L: ${:.2}", metrics.total_pnl);
+println!("Win Rate: {:.1}%", metrics.win_rate() * 100.0);
+println!("Profit Factor: {:.2}", metrics.profit_factor());
+println!("Max Drawdown: {:.2}%", metrics.max_drawdown_pct * 100.0);
+
+// Get detailed statistics
+let stats = engine.stats();
+println!("Sharpe Ratio: {:.2}", stats.sharpe_ratio);
+println!("Sortino Ratio: {:.2}", stats.sortino_ratio);
+println!("Calmar Ratio: {:.2}", stats.calmar_ratio);
+
+// Get position tracking
+let positions = engine.positions();
+println!("Realized P&L: ${:.2}", positions.realized_pnl());
+println!("Unrealized P&L: ${:.2}", positions.unrealized_pnl(&current_prices));
+
+// Get risk metrics
+let risk = engine.risk();
+println!("Max Position Reached: {}", risk.max_position_reached());
+println!("Risk Breaches: {}", risk.breach_count());
+
+// Engine state
+let state = engine.state();
+let events_processed = engine.events_processed();
+let pending = engine.pending_events();
+let current_time = engine.current_time();
+```
+
+## Engine State Management
+
+From `engine.rs:18-30`:
+
+```rust
+pub enum EngineState {
+    Ready,      // Ready to run
+    Running,    // Currently processing events
+    Paused,     // Temporarily paused
+    Completed,  // Successfully completed
+    Stopped,    // Stopped due to error or risk breach
+}
+
+// Check state
+match engine.state() {
+    EngineState::Ready => println!("Engine ready"),
+    EngineState::Running => println!("Processing..."),
+    EngineState::Completed => println!("Backtest complete"),
+    EngineState::Stopped => println!("Stopped: {}", engine.stop_reason()),
+    _ => {}
+}
+```
+
+## Resetting the Engine
+
+From `engine.rs:368-385`:
+
+```rust
+// Reset for new backtest run
+engine.reset();
+
+// Engine state is cleared:
+// - Event queue emptied
+// - Positions reset
+// - Metrics cleared
+// - Order books cleared
+// - State set to Ready
+
+// Re-register instruments
+engine.register_instrument(instrument);
+
+// Load new data
+load_market_data(&mut engine, "data/new_data.bin");
+
+// Run again
+engine.run(&mut strategy);
+```
+
+## Performance Optimization
+
+### Event Capacity Pre-allocation
+
+```rust
+// Pre-allocate event queue for better performance
+let expected_events = 1_000_000;
+let mut queue = EventQueue::with_capacity(expected_events);
+```
+
+### Batch Event Processing
+
+```rust
+// Process events in batches
+let batch_size = 10_000;
+loop {
+    let processed = engine.run_n(&mut strategy, batch_size);
+    if processed < batch_size {
+        break;  // No more events
+    }
+    
+    // Optional: checkpoint state
+    if engine.events_processed() % 100_000 == 0 {
+        save_checkpoint(&engine);
+    }
+}
+```
+
+### Disable Expensive Recording
+
+```rust
+let config = BacktestConfig {
+    output: OutputConfig {
+        record_tick_pnl: false,  // Major performance impact
+        record_fills: true,
+        record_orders: false,    // Disable if not needed
+        snapshot_interval: 50000, // Reduce snapshot frequency
+        verbosity: 0,            // Minimal logging
+    },
+    ..Default::default()
+};
+```
+
+## Complete Example
+
+```rust
+use nano_backtest::prelude::*;
+use nano_core::traits::Strategy;
+use nano_core::types::Instrument;
+
+fn main() -> Result<()> {
+    // Configure backtest
+    let config = BacktestConfig::aggressive_hft();
+    let mut engine = BacktestEngine::new(config);
+    
+    // Setup
+    let instrument = Instrument::es_future(1, "ESH24");
+    engine.register_instrument(instrument);
+    
+    // Load market data
+    load_market_data(&mut engine, "data/es_20240115.bin")?;
+    
+    println!("Starting backtest with {} events", engine.pending_events());
+    
+    // Run backtest
+    let mut strategy = MyMarketMakingStrategy::new();
+    engine.run(&mut strategy);
+    
+    // Print results
+    let metrics = engine.metrics();
+    let stats = engine.stats();
+    
+    println!("\n=== Backtest Results ===");
+    println!("Total P&L: ${:.2}", metrics.total_pnl);
+    println!("Sharpe Ratio: {:.2}", stats.sharpe_ratio);
+    println!("Win Rate: {:.1}%", metrics.win_rate() * 100.0);
+    println!("Max Drawdown: {:.2}%", metrics.max_drawdown_pct * 100.0);
+    println!("Total Trades: {}", metrics.num_trades);
+    println!("Maker Ratio: {:.1}%", metrics.maker_ratio() * 100.0);
+    
+    Ok(())
+}
+```
+
+## Related
+
+- [Backtest Configuration](/backtesting/configuration) - Configure latency, fees, and risk
+- [Performance Metrics](/backtesting/performance-metrics) - Detailed metrics explanation
+- [Strategy Development](/strategies/development) - Building trading strategies

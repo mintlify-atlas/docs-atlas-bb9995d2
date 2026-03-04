@@ -1,0 +1,489 @@
+---
+title: "RiskConfig"
+description: "Risk management configuration and limits"
+---
+
+## Overview
+
+The `RiskConfig` struct defines risk management rules and limits for both backtesting and live trading. It controls position sizes, drawdown limits, daily loss limits, and kill switch behavior.
+
+Source: `nano-backtest/src/config.rs` (used by both backtest and live trading)
+
+## RiskConfig
+
+```rust
+pub struct RiskConfig {
+    pub max_position: i64,
+    pub max_order_size: u32,
+    pub max_drawdown_pct: f64,
+    pub max_daily_loss: f64,
+    pub max_open_orders: usize,
+    pub enable_kill_switch: bool,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_position` | `i64` | 100 | Maximum net position (contracts) |
+| `max_order_size` | `u32` | 20 | Maximum single order size |
+| `max_drawdown_pct` | `f64` | 0.05 | Maximum drawdown (5%) before stop |
+| `max_daily_loss` | `f64` | 100,000.0 | Maximum daily loss ($) before stop |
+| `max_open_orders` | `usize` | 20 | Maximum concurrent open orders |
+| `enable_kill_switch` | `bool` | `true` | Enable automatic kill switch |
+
+## Constructor
+
+### `default`
+
+Creates a default risk configuration with conservative limits.
+
+```rust
+impl Default for RiskConfig
+```
+
+**Example:**
+```rust
+use nano_backtest::config::RiskConfig;
+
+let risk = RiskConfig::default();
+assert_eq!(risk.max_position, 100);
+assert_eq!(risk.max_drawdown_pct, 0.05);
+```
+
+## Field Details
+
+### max_position
+
+Maximum net position size per instrument.
+
+**Units:** Contracts (signed integer)
+
+**Range:** Position can be from `-max_position` to `+max_position`
+
+**Enforcement:** Checked before every order submission
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_position: 50,
+    ..Default::default()
+};
+
+// Valid positions: -50 to +50
+let current_pos = 45;
+let order_qty = 10;
+
+if current_pos + order_qty > risk.max_position {
+    println!("Order rejected: would exceed max position");
+}
+```
+
+**Typical Values:**
+- Retail/Small: 10-20 contracts
+- Medium: 50-100 contracts
+- Large: 100-500 contracts
+- HFT: 500+ contracts
+
+### max_order_size
+
+Maximum size for any single order.
+
+**Units:** Contracts (unsigned)
+
+**Purpose:**
+- Prevents accidental "fat finger" orders
+- Limits market impact per order
+- Forces position building through multiple orders
+
+**Constraint:** Should be &lt;= `max_position`
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_order_size: 10,
+    ..Default::default()
+};
+
+// Validate order size
+let order_size = 15;
+if order_size > risk.max_order_size {
+    return Err("Order size exceeds maximum");
+}
+```
+
+**Typical Values:**
+- Conservative: 5-10 contracts
+- Moderate: 10-20 contracts
+- Aggressive: 20-50 contracts
+
+### max_drawdown_pct
+
+Maximum allowed drawdown as a percentage of peak P&L.
+
+**Units:** Percentage (0.05 = 5%)
+
+**Measurement:** `(peak_pnl - current_pnl) / peak_pnl`
+
+**Behavior:** When exceeded, kill switch activates (if enabled)
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_drawdown_pct: 0.03,  // 3% max drawdown
+    enable_kill_switch: true,
+    ..Default::default()
+};
+
+// Tracking drawdown
+let peak_pnl = 100_000.0;
+let current_pnl = 95_000.0;
+let drawdown = (peak_pnl - current_pnl) / peak_pnl;
+
+if drawdown > risk.max_drawdown_pct {
+    println!("Drawdown {:.1}% exceeds limit {:.1}%", 
+        drawdown * 100.0, risk.max_drawdown_pct * 100.0);
+    // Kill switch activates
+}
+```
+
+**Typical Values:**
+- Very Conservative: 2-3%
+- Conservative: 3-5%
+- Moderate: 5-10%
+- Aggressive: 10-20%
+
+**Important:** Lower values provide better capital protection but may stop strategies prematurely during normal volatility.
+
+### max_daily_loss
+
+Maximum allowed loss in a single trading day.
+
+**Units:** Dollars (absolute value)
+
+**Measurement:** `daily_start_pnl - current_pnl`
+
+**Reset:** Automatically resets at start of each trading day
+
+**Behavior:** When exceeded, kill switch activates (if enabled)
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_daily_loss: 50_000.0,  // $50k max daily loss
+    enable_kill_switch: true,
+    ..Default::default()
+};
+
+// Track daily loss
+let daily_start_pnl = 1_000_000.0;
+let current_pnl = 955_000.0;
+let daily_loss = daily_start_pnl - current_pnl;
+
+if daily_loss > risk.max_daily_loss {
+    println!("Daily loss ${:.2} exceeds limit ${:.2}",
+        daily_loss, risk.max_daily_loss);
+    // Kill switch activates
+}
+```
+
+**Typical Values (as % of capital):**
+- Very Conservative: 1-2% of capital
+- Conservative: 2-5% of capital
+- Moderate: 5-10% of capital
+- Aggressive: 10-20% of capital
+
+**Example for $1M capital:**
+- Conservative: $10,000 - $50,000
+- Moderate: $50,000 - $100,000
+- Aggressive: $100,000+
+
+### max_open_orders
+
+Maximum number of orders that can be open simultaneously.
+
+**Units:** Count of orders
+
+**Purpose:**
+- Limits exposure to order management risk
+- Prevents runaway order submission
+- Controls system load
+
+**Enforcement:** Checked before submitting new orders
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_open_orders: 10,
+    ..Default::default()
+};
+
+// Track open orders
+let open_order_count = 9;
+
+if open_order_count >= risk.max_open_orders {
+    println!("Cannot submit order: at max open order limit");
+}
+```
+
+**Typical Values:**
+- Low frequency: 5-10 orders
+- Medium frequency: 10-20 orders
+- High frequency: 20-100+ orders
+
+### enable_kill_switch
+
+Enables automatic trading halt when risk limits are breached.
+
+**Values:**
+- `true` (default): Automatically stops trading on breach
+- `false`: Only logs warnings, continues trading
+
+**Activates when:**
+- Drawdown exceeds `max_drawdown_pct`
+- Daily loss exceeds `max_daily_loss`
+
+**Behavior when activated:**
+- All new orders are rejected
+- Existing orders may be cancelled (depending on implementation)
+- Manual reset required to resume trading
+
+**Example:**
+```rust
+let risk = RiskConfig {
+    max_drawdown_pct: 0.05,
+    max_daily_loss: 50_000.0,
+    enable_kill_switch: true,
+    ..Default::default()
+};
+
+// In risk manager
+if kill_switch_active {
+    println!("KILL SWITCH ACTIVE - All trading halted");
+    return Err("Kill switch active");
+}
+```
+
+**Recommendation:** Always enable for live trading
+
+## Configuration Presets
+
+### Conservative
+
+For risk-averse traders or initial live trading.
+
+```rust
+let conservative = RiskConfig {
+    max_position: 20,
+    max_order_size: 5,
+    max_drawdown_pct: 0.03,  // 3%
+    max_daily_loss: 25_000.0,
+    max_open_orders: 10,
+    enable_kill_switch: true,
+};
+```
+
+### Moderate
+
+Balanced risk/reward profile.
+
+```rust
+let moderate = RiskConfig {
+    max_position: 50,
+    max_order_size: 10,
+    max_drawdown_pct: 0.05,  // 5%
+    max_daily_loss: 50_000.0,
+    max_open_orders: 20,
+    enable_kill_switch: true,
+};
+```
+
+### Aggressive
+
+For experienced traders with higher risk tolerance.
+
+```rust
+let aggressive = RiskConfig {
+    max_position: 100,
+    max_order_size: 20,
+    max_drawdown_pct: 0.10,  // 10%
+    max_daily_loss: 100_000.0,
+    max_open_orders: 50,
+    enable_kill_switch: true,
+};
+```
+
+### HFT
+
+Optimized for high-frequency strategies.
+
+```rust
+let hft = RiskConfig {
+    max_position: 200,
+    max_order_size: 50,
+    max_drawdown_pct: 0.04,  // 4%
+    max_daily_loss: 75_000.0,
+    max_open_orders: 100,
+    enable_kill_switch: true,
+};
+```
+
+### Backtesting (Relaxed)
+
+More lenient for strategy research.
+
+```rust
+let backtest = RiskConfig {
+    max_position: 500,
+    max_order_size: 100,
+    max_drawdown_pct: 0.20,  // 20%
+    max_daily_loss: 500_000.0,
+    max_open_orders: 200,
+    enable_kill_switch: false,  // Want full backtest data
+};
+```
+
+## RiskManager Usage
+
+The `RiskManager` enforces these limits during trading:
+
+```rust
+use nano_backtest::risk::RiskManager;
+use nano_backtest::config::RiskConfig;
+
+// Create risk manager
+let config = RiskConfig {
+    max_position: 50,
+    max_order_size: 10,
+    max_drawdown_pct: 0.05,
+    max_daily_loss: 50_000.0,
+    max_open_orders: 20,
+    enable_kill_switch: true,
+};
+
+let mut risk_manager = RiskManager::new(config);
+
+// Check order before submission
+let current_position = 40;
+match risk_manager.check_order(&order, current_position) {
+    Ok(()) => {
+        // Order passes risk checks, can submit
+        submit_order(order);
+    }
+    Err(e) => {
+        println!("Order rejected by risk manager: {}", e);
+    }
+}
+
+// Update P&L tracking
+let kill_switch_triggered = risk_manager.update_pnl(current_pnl, position);
+if kill_switch_triggered {
+    println!("KILL SWITCH ACTIVATED!");
+    // Halt all trading
+}
+```
+
+## Validation
+
+Validate configuration before use:
+
+```rust
+fn validate_risk_config(config: &RiskConfig) -> Result<(), String> {
+    if config.max_position <= 0 {
+        return Err("max_position must be positive".to_string());
+    }
+    
+    if config.max_order_size == 0 {
+        return Err("max_order_size must be positive".to_string());
+    }
+    
+    if config.max_order_size > config.max_position as u32 {
+        return Err("max_order_size cannot exceed max_position".to_string());
+    }
+    
+    if config.max_drawdown_pct <= 0.0 || config.max_drawdown_pct > 1.0 {
+        return Err("max_drawdown_pct must be between 0 and 1".to_string());
+    }
+    
+    if config.max_daily_loss <= 0.0 {
+        return Err("max_daily_loss must be positive".to_string());
+    }
+    
+    if config.max_open_orders == 0 {
+        return Err("max_open_orders must be positive".to_string());
+    }
+    
+    Ok(())
+}
+```
+
+## Complete Example
+
+```rust
+use nano_backtest::config::{BacktestConfig, RiskConfig};
+use nano_backtest::{BacktestEngine, risk::RiskManager};
+
+// Define risk parameters
+let risk_config = RiskConfig {
+    max_position: 50,
+    max_order_size: 10,
+    max_drawdown_pct: 0.04,  // 4%
+    max_daily_loss: 40_000.0,
+    max_open_orders: 15,
+    enable_kill_switch: true,
+};
+
+// Validate configuration
+validate_risk_config(&risk_config)
+    .expect("Invalid risk configuration");
+
+// Create backtest config with risk settings
+let config = BacktestConfig {
+    initial_capital: 1_000_000.0,
+    risk: risk_config,
+    ..BacktestConfig::default()
+};
+
+// Run backtest
+let mut engine = BacktestEngine::new(config);
+engine.run(&mut strategy);
+
+// Check risk metrics
+let metrics = engine.metrics();
+let risk = engine.risk();
+
+println!("Risk Analysis:");
+println!("  Max Drawdown: {:.2}%", metrics.max_drawdown_pct * 100.0);
+println!("  Limit: {:.2}%", config.risk.max_drawdown_pct * 100.0);
+println!("  Kill Switch Activated: {}", risk.is_kill_switch_active());
+println!("  Breach Count: {}", risk.breach_count());
+
+if metrics.max_drawdown_pct > config.risk.max_drawdown_pct {
+    println!("WARNING: Strategy exceeded risk limits");
+}
+```
+
+## Best Practices
+
+1. **Start Conservative**: Begin with tight limits and loosen gradually
+
+2. **Scale with Capital**: Set daily loss as percentage of capital (2-5%)
+
+3. **Always Enable Kill Switch**: Especially for live trading
+
+4. **Test Thoroughly**: Run backtests with different risk parameters
+
+5. **Monitor Regularly**: Track how often limits are hit
+
+6. **Adjust for Volatility**: Tighten limits during high volatility
+
+7. **Document Changes**: Log all risk parameter modifications
+
+8. **Review After Breaches**: Analyze what caused kill switch activation
+
+## See Also
+
+- [RiskManager](/api/backtest/risk) - Risk management implementation
+- [BacktestConfig](/api/backtest/config) - Complete backtest configuration
+- [TradingConfig](/api/config/trading) - Trading parameters

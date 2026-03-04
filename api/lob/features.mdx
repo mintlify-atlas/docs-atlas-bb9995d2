@@ -1,0 +1,458 @@
+---
+title: "LOB Feature Extraction"
+description: "Extract machine learning features from limit order book snapshots"
+---
+
+## Overview
+
+The feature extraction module provides tools for extracting numerical features from order book states for use in machine learning models, technical analysis, and market microstructure research.
+
+Source: `nano-lob/src/features.rs`
+
+## LobFeatureExtractor
+
+Extracts comprehensive features from order book snapshots.
+
+```rust
+pub struct LobFeatureExtractor {
+    tick_size: f64,
+    qty_scale: f64,
+}
+```
+
+### Constructor
+
+#### `new`
+
+Creates a feature extractor with default parameters.
+
+```rust
+pub fn new() -> Self
+```
+
+**Defaults:**
+- `tick_size`: 0.25 (ES futures)
+- `qty_scale`: 100.0 (normalization factor)
+
+#### `with_params`
+
+Creates a feature extractor with custom parameters.
+
+```rust
+pub fn with_params(tick_size: f64, qty_scale: f64) -> Self
+```
+
+**Parameters:**
+- `tick_size`: Minimum price increment for the instrument
+- `qty_scale`: Quantity normalization factor (divides quantities)
+
+**Example:**
+```rust
+use nano_lob::features::LobFeatureExtractor;
+
+// For ES futures (0.25 tick, normalize by 100)
+let extractor = LobFeatureExtractor::with_params(0.25, 100.0);
+
+// For NQ futures (0.25 tick, normalize by 50)
+let extractor_nq = LobFeatureExtractor::with_params(0.25, 50.0);
+```
+
+## LobFeatures
+
+Extracted features from an order book snapshot.
+
+```rust
+pub struct LobFeatures {
+    pub microprice: f64,
+    pub weighted_mid: f64,
+    pub spread: f64,
+    pub imbalance_l1: f64,
+    pub imbalance_total: f64,
+    pub bid_depth: f64,
+    pub ask_depth: f64,
+    pub mid_price: f64,
+    pub best_bid: f64,
+    pub best_ask: f64,
+    pub bid_levels: [f64; 10],
+    pub ask_levels: [f64; 10],
+    pub bid_cumulative: [f64; 10],
+    pub ask_cumulative: [f64; 10],
+}
+```
+
+### Feature Descriptions
+
+#### Price Features
+
+| Feature | Description |
+|---------|-------------|
+| `microprice` | Volume-weighted mid price using BBO quantities |
+| `weighted_mid` | Depth-weighted mid price across multiple levels |
+| `mid_price` | Simple mid: `(best_bid + best_ask) / 2` |
+| `best_bid` | Best bid price |
+| `best_ask` | Best ask price |
+| `spread` | Bid-ask spread in ticks |
+
+#### Imbalance Features
+
+| Feature | Description | Range |
+|---------|-------------|-------|
+| `imbalance_l1` | Level 1 book imbalance | -1 to +1 |
+| `imbalance_total` | Total book imbalance across all levels | -1 to +1 |
+
+**Formula:** `(bid_qty - ask_qty) / (bid_qty + ask_qty)`
+
+**Interpretation:**
+- +1: Only bids (strong buying pressure)
+- 0: Balanced
+- -1: Only asks (strong selling pressure)
+
+#### Depth Features
+
+| Feature | Description |
+|---------|-------------|
+| `bid_depth` | Total bid quantity (normalized) |
+| `ask_depth` | Total ask quantity (normalized) |
+| `bid_levels[i]` | Quantity at bid level i (normalized) |
+| `ask_levels[i]` | Quantity at ask level i (normalized) |
+| `bid_cumulative[i]` | Cumulative bid quantity through level i |
+| `ask_cumulative[i]` | Cumulative ask quantity through level i |
+
+## Feature Extraction Methods
+
+### `extract`
+
+Extracts all features from an order book.
+
+```rust
+pub fn extract(&self, book: &OrderBook) -> LobFeatures
+```
+
+**Parameters:**
+- `book`: Order book to extract features from
+
+**Returns:** Complete feature set
+
+**Example:**
+```rust
+let extractor = LobFeatureExtractor::new();
+let features = extractor.extract(&book);
+
+println!("Microprice: {:.2}", features.microprice);
+println!("L1 Imbalance: {:.3}", features.imbalance_l1);
+println!("Spread: {:.1} ticks", features.spread);
+```
+
+### `microprice`
+
+Calculates volume-weighted microprice.
+
+```rust
+pub fn microprice(&self, book: &OrderBook) -> Option<f64>
+```
+
+**Formula:** `(bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty)`
+
+**Interpretation:** The microprice is a better estimate of "fair value" than simple mid-price when there's a quantity imbalance at the BBO.
+
+**Example:**
+```rust
+if let Some(micro) = extractor.microprice(&book) {
+    let mid = book.mid_price().unwrap().as_f64();
+    let diff = micro - mid;
+    println!("Microprice {:.2} (mid {:.2}, diff {:.3})", micro, mid, diff);
+}
+```
+
+### `weighted_mid`
+
+Calculates depth-weighted mid price using multiple levels.
+
+```rust
+pub fn weighted_mid(&self, book: &OrderBook, levels: usize) -> Option<f64>
+```
+
+**Parameters:**
+- `levels`: Number of levels to include (typically 5-10)
+
+**Weighting:** Each level is weighted by `1 / (level_index + 1)` and its quantity
+
+**Use case:** Better fair value estimate using deeper book information
+
+### `book_imbalance`
+
+Calculates order book imbalance at a given depth.
+
+```rust
+pub fn book_imbalance(&self, book: &OrderBook, levels: usize) -> f64
+```
+
+**Parameters:**
+- `levels`: Number of levels to include
+
+**Returns:** Imbalance between -1 and +1
+
+**Research:** Book imbalance is predictive of short-term price movement
+
+### `order_flow_imbalance`
+
+Calculates Order Flow Imbalance (OFI) between two consecutive book states.
+
+```rust
+pub fn order_flow_imbalance(&self, prev_book: &OrderBook, curr_book: &OrderBook) -> f64
+```
+
+**Parameters:**
+- `prev_book`: Previous book state
+- `curr_book`: Current book state
+
+**Returns:** Normalized OFI value
+
+**Details:**
+- Tracks changes in bid/ask prices and quantities
+- Positive OFI: More aggressive buying
+- Negative OFI: More aggressive selling
+
+**Research:** OFI is a strong predictor of price changes (Cont et al. 2014)
+
+### `to_array`
+
+Converts features to a flat array for ML model input.
+
+```rust
+pub fn to_array(&self, book: &OrderBook) -> [f64; 44]
+```
+
+**Returns:** 44-element feature vector
+
+**Layout:**
+- [0-3]: microprice, weighted_mid, spread, imbalance_l1
+- [4-13]: bid_levels (10 levels)
+- [14-23]: ask_levels (10 levels)
+- [24-33]: bid_cumulative (10 levels)
+- [34-43]: ask_cumulative (10 levels)
+
+**Example:**
+```rust
+let features = extractor.to_array(&book);
+// Pass to neural network or other ML model
+let prediction = model.predict(&features);
+```
+
+## VpinCalculator
+
+Calculates VPIN (Volume-Synchronized Probability of Informed Trading).
+
+```rust
+pub struct VpinCalculator {
+    bucket_size: u32,
+    num_buckets: usize,
+    current_buy_volume: u32,
+    current_sell_volume: u32,
+    buckets: Vec<(u32, u32)>,
+}
+```
+
+### Constructor
+
+#### `new`
+
+Creates a new VPIN calculator.
+
+```rust
+pub fn new(bucket_size: u32, num_buckets: usize) -> Self
+```
+
+**Parameters:**
+- `bucket_size`: Volume per bucket (e.g., 5000 contracts)
+- `num_buckets`: Rolling window size (e.g., 50 buckets)
+
+### Methods
+
+#### `add_trade`
+
+Adds a trade to the calculator.
+
+```rust
+pub fn add_trade(&mut self, quantity: Quantity, is_buy: bool)
+```
+
+**Parameters:**
+- `quantity`: Trade size
+- `is_buy`: `true` for buy-side trade, `false` for sell-side
+
+**Details:**
+- Accumulates volume until bucket is complete
+- Maintains rolling window of buckets
+
+#### `calculate`
+
+Calculates current VPIN value.
+
+```rust
+pub fn calculate(&self) -> f64
+```
+
+**Returns:** VPIN value between 0 and 1
+
+**Formula:** `sum(|buy_vol - sell_vol|) / sum(total_vol)` across all buckets
+
+**Interpretation:**
+- 0: Balanced order flow
+- 1: Completely one-sided flow (max toxicity)
+- > 0.3: High toxicity warning
+
+**Research:** VPIN is used to measure order flow toxicity and predict flash crashes
+
+### Example
+
+```rust
+use nano_lob::features::VpinCalculator;
+
+let mut vpin = VpinCalculator::new(5000, 50);
+
+for trade in trades {
+    vpin.add_trade(trade.quantity, trade.is_buy);
+    
+    if vpin.bucket_count() >= 10 {
+        let toxicity = vpin.calculate();
+        println!("VPIN: {:.3}", toxicity);
+        
+        if toxicity > 0.35 {
+            println!("WARNING: High order flow toxicity!");
+        }
+    }
+}
+```
+
+## TradeFlowTracker
+
+Tracks cumulative trade flow statistics.
+
+```rust
+pub struct TradeFlowTracker {
+    pub buy_volume: u64,
+    pub sell_volume: u64,
+    pub buy_count: u32,
+    pub sell_count: u32,
+    pub last_update: Timestamp,
+}
+```
+
+### Constructor
+
+#### `new`
+
+Creates a new trade flow tracker.
+
+```rust
+pub fn new() -> Self
+```
+
+### Methods
+
+#### `record_trade`
+
+Records a trade.
+
+```rust
+pub fn record_trade(&mut self, quantity: Quantity, is_buy: bool, timestamp: Timestamp)
+```
+
+#### `net_flow`
+
+Returns net flow (buy volume - sell volume).
+
+```rust
+pub fn net_flow(&self) -> i64
+```
+
+#### `flow_imbalance`
+
+Returns flow imbalance between -1 and +1.
+
+```rust
+pub fn flow_imbalance(&self) -> f64
+```
+
+**Formula:** `(buy_vol - sell_vol) / (buy_vol + sell_vol)`
+
+#### `reset`
+
+Resets all counters.
+
+```rust
+pub fn reset(&mut self)
+```
+
+### Example
+
+```rust
+use nano_lob::features::TradeFlowTracker;
+
+let mut flow = TradeFlowTracker::new();
+
+// Track trades over 1 minute
+for trade in minute_trades {
+    flow.record_trade(trade.quantity, trade.is_buy, trade.timestamp);
+}
+
+// Analyze flow
+println!("Buy volume: {}", flow.buy_volume);
+println!("Sell volume: {}", flow.sell_volume);
+println!("Net flow: {}", flow.net_flow());
+println!("Flow imbalance: {:.2}", flow.flow_imbalance());
+
+if flow.flow_imbalance() > 0.5 {
+    println!("Strong buying pressure");
+}
+```
+
+## Complete Example: Feature Pipeline
+
+```rust
+use nano_lob::{OrderBook, features::LobFeatureExtractor};
+
+let extractor = LobFeatureExtractor::new();
+let mut prev_book = None;
+
+for update in market_data {
+    book.apply_book_update(&update);
+    
+    if !book.is_valid() {
+        continue;
+    }
+    
+    // Extract features
+    let features = extractor.extract(&book);
+    
+    // Calculate OFI if we have previous state
+    let ofi = if let Some(ref prev) = prev_book {
+        extractor.order_flow_imbalance(prev, &book)
+    } else {
+        0.0
+    };
+    
+    // Log features
+    println!("Timestamp: {}", book.timestamp().as_nanos());
+    println!("  Microprice: {:.2}", features.microprice);
+    println!("  Spread: {:.1} ticks", features.spread);
+    println!("  L1 Imbalance: {:.3}", features.imbalance_l1);
+    println!("  Total Imbalance: {:.3}", features.imbalance_total);
+    println!("  OFI: {:.3}", ofi);
+    
+    // Convert to ML features
+    let feature_vec = extractor.to_array(&book);
+    
+    // Make prediction
+    // let signal = model.predict(&feature_vec);
+    
+    // Update previous state
+    prev_book = Some(book.clone());
+}
+```
+
+## See Also
+
+- [OrderBook](/api/lob/orderbook) - Order book data structure
+- [Market Data Feed](/api/feed/parser) - Parsing market data

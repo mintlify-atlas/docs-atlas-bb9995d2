@@ -1,0 +1,402 @@
+---
+title: "Market Data Feeds"
+description: "CME MDP 3.0 protocol implementation and synthetic data generation"
+---
+
+NanoARB supports high-performance market data ingestion from CME Group exchanges using the MDP 3.0 (Market Data Platform) protocol, as well as synthetic data generation for development and testing.
+
+## CME MDP 3.0 Protocol
+
+The `nano-feed` crate provides a complete implementation of the CME MDP 3.0 binary protocol with zero-copy parsing for ultra-low latency.
+
+### Message Types
+
+MDP 3.0 messages are parsed into strongly-typed Rust structures:
+
+```rust
+pub enum MdpMessage {
+    BookUpdate(BookUpdate),     // Template 46: Incremental book updates
+    Trade(TradeUpdate),          // Template 42: Trade executions
+    ChannelReset(ChannelReset),  // Template 4: Channel resets
+    SecurityStatus(SecurityStatus), // Template 30: Trading status
+    Snapshot(Snapshot),          // Template 52: Full book snapshot
+    Unknown { template_id: u16, length: usize },
+}
+```
+
+**Source:** `nano-feed/src/messages.rs:354-373`
+
+### Book Update Messages
+
+Book updates contain incremental changes to the order book:
+
+```rust
+pub struct BookUpdate {
+    pub transact_time: u64,           // Transaction time in nanoseconds
+    pub match_event_indicator: u8,     // Batch and event flags
+    pub security_id: i32,              // Instrument identifier
+    pub rpt_seq: u32,                  // Sequence number for gap detection
+    pub exponent: i8,                  // Price exponent (typically -2 or -3)
+    pub entries: Vec<BookEntry>,       // Book level changes
+}
+
+pub struct BookEntry {
+    pub price: i64,                    // Raw price (needs exponent adjustment)
+    pub quantity: i32,                 // Quantity at this level
+    pub num_orders: i32,               // Number of orders
+    pub price_level: u8,               // Level (1 = best, 2 = second best, ...)
+    pub action: UpdateAction,          // New/Change/Delete
+    pub entry_type: EntryType,         // Bid/Offer/Trade
+}
+```
+
+**Source:** `nano-feed/src/messages.rs:183-198`, `146-160`
+
+### Price Encoding
+
+CME uses mantissa-exponent encoding for prices:
+
+```rust
+// Convert raw MDP price to normalized price
+let entry = BookEntry { price: 500025000, ... };
+let exponent = -3;  // Means divide by 1000
+
+// Result: 500025000 / 1000 = 500025 (represents 5000.25)
+let price = entry.to_price(exponent);
+```
+
+The exponent is typically:
+- `-2` for ES futures (0.01 precision)
+- `-3` for higher precision instruments
+
+**Source:** `nano-feed/src/messages.rs:163-168`
+
+### Trade Messages
+
+Trade messages contain executed trades with aggressor side:
+
+```rust
+pub struct TradeUpdate {
+    pub transact_time: u64,
+    pub security_id: i32,
+    pub rpt_seq: u32,
+    pub exponent: i8,
+    pub entries: Vec<TradeEntry>,
+}
+
+pub struct TradeEntry {
+    pub price: i64,
+    pub quantity: i32,
+    pub num_orders: i32,
+    pub aggressor_side: u8,  // 0 = buy, 1 = sell
+    pub action: UpdateAction,
+}
+```
+
+**Source:** `nano-feed/src/messages.rs:274-289`, `235-247`
+
+## Zero-Copy Parsing
+
+NanoARB uses the `nom` parser combinator library for zero-copy, zero-allocation parsing of binary MDP 3.0 messages.
+
+### Parser Architecture
+
+```rust
+use nom::{
+    bytes::complete::take,
+    number::complete::{le_i32, le_i64, le_u64},
+    IResult,
+};
+
+fn parse_book_entry(input: &[u8]) -> IResult<&[u8], BookEntry> {
+    let (input, price) = le_i64(input)?;
+    let (input, quantity) = le_i32(input)?;
+    let (input, num_orders) = le_i32(input)?;
+    let (input, price_level) = le_u8(input)?;
+    let (input, action_raw) = le_u8(input)?;
+    let (input, entry_type_raw) = le_u8(input)?;
+    let (input, _padding) = take(1usize)(input)?;
+    
+    Ok((input, BookEntry { /* ... */ }))
+}
+```
+
+**Source:** `nano-feed/src/parser.rs:170-193`
+
+### Message Parser
+
+The `MdpParser` maintains sequence tracking and handles incomplete buffers:
+
+```rust
+let mut parser = MdpParser::new();
+
+// Parse single message
+match parser.parse(buffer) {
+    Ok((message, remaining)) => {
+        // Process message
+        match message {
+            MdpMessage::BookUpdate(update) => {
+                book.apply_book_update(&update);
+            }
+            MdpMessage::Trade(trade) => {
+                // Process trade
+            }
+            _ => {}
+        }
+    }
+    Err(FeedError::Incomplete { needed }) => {
+        // Wait for more data
+    }
+    Err(FeedError::SequenceGap { expected, actual }) => {
+        // Request snapshot to recover
+    }
+    Err(e) => eprintln!("Parse error: {}", e),
+}
+```
+
+**Source:** `nano-feed/src/parser.rs:35-94`
+
+### Sequence Gap Detection
+
+The parser automatically detects missing messages:
+
+```rust
+impl MdpParser {
+    fn check_sequence(&mut self, seq: u32) -> FeedResult<()> {
+        if !self.initialized {
+            self.expected_seq = seq + 1;
+            self.initialized = true;
+            return Ok(());
+        }
+
+        if seq != self.expected_seq {
+            let expected = self.expected_seq;
+            self.expected_seq = seq + 1;
+            return Err(FeedError::SequenceGap { expected, actual: seq });
+        }
+
+        self.expected_seq = seq + 1;
+        Ok(())
+    }
+}
+```
+
+**Source:** `nano-feed/src/parser.rs:115-133`
+
+## Synthetic Data Generation
+
+For development and backtesting, `SyntheticGenerator` creates realistic market data:
+
+### Configuration
+
+```rust
+let config = SyntheticConfig {
+    initial_mid: 500000,           // Starting mid price (5000.00)
+    tick_size: 25,                 // Tick size (0.25)
+    avg_spread_ticks: 1,           // Average spread in ticks
+    avg_quantity: 100,             // Average quantity per level
+    num_levels: 10,                // Number of price levels
+    volatility: 4.0,               // Price volatility (ticks per event)
+    trade_frequency: 0.4,          // Probability of trade (vs book update)
+    avg_trade_size: 3,             // Average trade size
+    start_time_ns: 1_700_000_000_000_000_000,
+    avg_event_interval_ns: 1_000_000,  // 1ms between events
+    security_id: 1,
+    exponent: -2,
+};
+```
+
+**Source:** `nano-feed/src/synthetic.rs:14-40`
+
+### Preset Configurations
+
+Pre-configured settings for common instruments:
+
+```rust
+// E-mini S&P 500 futures
+let config = SyntheticConfig::es_futures();
+
+// E-mini Nasdaq futures
+let config = SyntheticConfig::nq_futures();
+```
+
+**Source:** `nano-feed/src/synthetic.rs:62-92`
+
+### Generating Events
+
+```rust
+let mut gen = SyntheticGenerator::new(config);
+
+// Generate single event
+let message = gen.next_event();  // Returns BookUpdate or Trade
+
+// Generate multiple events
+let messages = gen.generate_n(1000);
+
+// Or use as iterator
+for message in gen.iter().take(1000) {
+    match message {
+        MdpMessage::BookUpdate(update) => { /* ... */ }
+        MdpMessage::Trade(trade) => { /* ... */ }
+        _ => {}
+    }
+}
+```
+
+**Source:** `nano-feed/src/synthetic.rs:157-176`, `365-373`
+
+### Realistic Market Dynamics
+
+The generator simulates:
+- **Price movement**: Random walk with configurable volatility
+- **Bid-ask spread**: Maintains realistic spread in ticks
+- **Depth levels**: Multiple price levels with varying quantities
+- **Trade flow**: Alternating buy/sell trades that consume liquidity
+- **Time progression**: Realistic timestamps with configurable intervals
+
+```rust
+// Price movement simulation
+let price_change: f64 = self.rng.gen::<f64>() * 2.0 - 1.0;  // -1 to 1
+let tick_change = (price_change * self.config.volatility).round() as i64;
+self.current_mid += tick_change * self.config.tick_size;
+```
+
+**Source:** `nano-feed/src/synthetic.rs:166-169`
+
+## Usage Example
+
+### Real Market Data
+
+```rust
+use nano_feed::parser::MdpParser;
+use nano_feed::messages::MdpMessage;
+use nano_lob::OrderBook;
+
+// Initialize parser and order book
+let mut parser = MdpParser::new();
+let mut book = OrderBook::new(1);  // security_id = 1
+
+// Connect to CME multicast feed (pseudo-code)
+let socket = UdpSocket::bind("239.1.1.1:10000")?;
+
+loop {
+    let mut buffer = [0u8; 8192];
+    let n = socket.recv(&mut buffer)?;
+    
+    // Parse all messages in the packet
+    match parser.parse_all(&buffer[..n]) {
+        Ok(messages) => {
+            for msg in messages {
+                if let MdpMessage::BookUpdate(update) = msg {
+                    book.apply_book_update(&update);
+                }
+            }
+        }
+        Err(e) => eprintln!("Parse error: {:?}", e),
+    }
+}
+```
+
+### Synthetic Data for Testing
+
+```rust
+use nano_feed::synthetic::{SyntheticGenerator, SyntheticConfig};
+use nano_lob::OrderBook;
+
+// Create generator with ES futures profile
+let config = SyntheticConfig::es_futures();
+let mut gen = SyntheticGenerator::new(config);
+let mut book = OrderBook::new(1);
+
+// Generate and process 10,000 events
+for message in gen.iter().take(10_000) {
+    match message {
+        MdpMessage::BookUpdate(update) => {
+            book.apply_book_update(&update);
+            
+            // Extract features after each update
+            if let Some((bid, _)) = book.best_bid() {
+                println!("Best bid: {}", bid.as_f64());
+            }
+        }
+        MdpMessage::Trade(trade) => {
+            // Process trades
+            for entry in &trade.entries {
+                println!("Trade: {} @ {}", 
+                    entry.quantity, 
+                    entry.to_price(trade.exponent).as_f64()
+                );
+            }
+        }
+        _ => {}
+    }
+}
+```
+
+## Performance Characteristics
+
+### Parsing Latency
+
+The zero-copy parser achieves:
+- **BookUpdate parsing**: ~200-400ns per message
+- **Trade parsing**: ~150-300ns per message  
+- **Sequence validation**: ~10ns overhead per message
+
+Benchmark your system:
+```bash
+cd crates/nano-feed
+cargo bench --bench parser
+```
+
+### Memory Usage
+
+The parser maintains minimal state:
+- **MdpParser**: 16 bytes (sequence counter + flags)
+- **Per-message allocation**: Only for variable-length entry vectors
+- **Zero-copy**: No intermediate buffers for parsing
+
+## Error Handling
+
+```rust
+pub enum FeedError {
+    Incomplete { needed: usize },
+    InvalidHeader(String),
+    ParseError(String),
+    SequenceGap { expected: u32, actual: u32 },
+    IoError(std::io::Error),
+}
+```
+
+Handle gaps by requesting snapshots:
+
+```rust
+match parser.parse(buffer) {
+    Err(FeedError::SequenceGap { expected, actual }) => {
+        eprintln!("Gap detected: expected {}, got {}", expected, actual);
+        // Request snapshot to resync
+        request_snapshot(security_id)?;
+        parser.reset();
+    }
+    _ => {}
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Feature Extraction" icon="chart-line" href="/data/feature-extraction">
+  Extract LOB features from market data
+</Card>
+
+<Card title="Order Book" icon="book" href="/api/orderbook">
+  Reconstruct the limit order book
+</Card>
+
+<Card title="ML Integration" icon="brain" href="/data/ml-integration">
+  Feed data into ML models
+</Card>
+
+<Card title="Backtesting" icon="clock-rotate-left" href="/backtesting/overview">
+  Backtest strategies on historical data
+</Card>
+</CardGroup>

@@ -1,0 +1,472 @@
+---
+title: "Market Making"
+description: "Build market-making strategies with inventory management and quote optimization"
+---
+
+## Overview
+
+The `MarketMakerStrategy` provides a complete market-making implementation with:
+
+- Automated quote generation and management
+- Inventory-based price skewing
+- Position limits and risk controls
+- Multi-level quoting support
+
+## MarketMakerConfig
+
+Configure your market-making strategy with `MarketMakerConfig`:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketMakerConfig {
+    /// Base spread in ticks
+    pub base_spread_ticks: i64,
+    /// Spread skew based on inventory (-1 to +1)
+    pub inventory_skew_factor: f64,
+    /// Maximum inventory (position limit)
+    pub max_inventory: i64,
+    /// Order size per level
+    pub order_size: u32,
+    /// Number of levels to quote
+    pub num_levels: usize,
+    /// Minimum edge required (in ticks)
+    pub min_edge_ticks: i64,
+    /// Cancel distance from BBO (in ticks)
+    pub cancel_distance_ticks: i64,
+    /// Tick size
+    pub tick_size: i64,
+    /// Refresh interval (in nanoseconds)
+    pub refresh_interval_ns: i64,
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:12-32`
+
+### Default Configuration
+
+```rust
+impl Default for MarketMakerConfig {
+    fn default() -> Self {
+        Self {
+            base_spread_ticks: 2,
+            inventory_skew_factor: 0.5,
+            max_inventory: 50,
+            order_size: 5,
+            num_levels: 3,
+            min_edge_ticks: 1,
+            cancel_distance_ticks: 10,
+            tick_size: 25,
+            refresh_interval_ns: 100_000_000, // 100ms
+        }
+    }
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:34-48`
+
+## Creating a Market Maker
+
+```rust
+use nano_strategy::{MarketMakerStrategy, MarketMakerConfig};
+
+// Create custom configuration
+let config = MarketMakerConfig {
+    base_spread_ticks: 3,
+    inventory_skew_factor: 0.6,
+    max_inventory: 100,
+    order_size: 10,
+    num_levels: 5,
+    min_edge_ticks: 1,
+    cancel_distance_ticks: 15,
+    tick_size: 25,
+    refresh_interval_ns: 50_000_000, // 50ms
+};
+
+// Create the strategy
+let mut strategy = MarketMakerStrategy::new(
+    "my_market_maker",
+    instrument_id,
+    config,
+    12.5, // tick value
+);
+```
+
+## Inventory Skewing
+
+The market maker automatically adjusts quote prices based on inventory to reduce risk:
+
+```rust
+/// Calculate skewed quote prices based on inventory
+fn calculate_quotes(&self, mid: Price) -> (Price, Price) {
+    let position = self.base.position();
+    let max_inv = self.config.max_inventory as f64;
+
+    // Calculate inventory skew (-1 to +1)
+    let inv_ratio = if max_inv > 0.0 {
+        (position as f64 / max_inv).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Skew quotes to reduce inventory
+    // Positive inventory -> lower bid, higher ask
+    let skew_ticks = (inv_ratio
+        * self.config.inventory_skew_factor
+        * self.config.base_spread_ticks as f64) as i64;
+
+    let half_spread = self.config.base_spread_ticks * self.config.tick_size / 2;
+
+    let bid_price =
+        Price::from_raw(mid.raw() - half_spread - skew_ticks * self.config.tick_size);
+    let ask_price =
+        Price::from_raw(mid.raw() + half_spread - skew_ticks * self.config.tick_size);
+
+    (bid_price, ask_price)
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:196-222`
+
+### How Inventory Skewing Works
+
+1. **Neutral Position** (inventory = 0)
+   - Quotes are symmetric around mid price
+   - Bid: mid - half_spread
+   - Ask: mid + half_spread
+
+2. **Long Position** (inventory > 0)
+   - Bid is lowered (less aggressive buying)
+   - Ask is lowered (more aggressive selling)
+   - Encourages reducing inventory
+
+3. **Short Position** (inventory < 0)
+   - Bid is raised (more aggressive buying)
+   - Ask is raised (less aggressive selling)
+   - Encourages covering short
+
+### Example
+
+```rust
+// Configuration
+let config = MarketMakerConfig {
+    base_spread_ticks: 2,
+    inventory_skew_factor: 0.5,
+    max_inventory: 100,
+    tick_size: 25,
+    ..Default::default()
+};
+
+// With inventory = +50 (half of max)
+let mid = Price::from_raw(50000);
+let (bid, ask) = strategy.calculate_quotes(mid);
+
+// inv_ratio = 50 / 100 = 0.5
+// skew_ticks = 0.5 * 0.5 * 2 = 0.5 ticks
+// bid = 50000 - 25 - (0.5 * 25) = 49962
+// ask = 50000 + 25 - (0.5 * 25) = 50012
+```
+
+## Quote Management
+
+The `QuoteManager` tracks all active orders:
+
+```rust
+#[derive(Debug, Default)]
+pub struct QuoteManager {
+    /// Active bid orders
+    bid_orders: HashMap<OrderId, (Price, Quantity)>,
+    /// Active ask orders
+    ask_orders: HashMap<OrderId, (Price, Quantity)>,
+    /// Next order ID
+    next_order_id: u64,
+    /// Orders pending acknowledgment
+    pending_acks: HashMap<OrderId, Side>,
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:51-61`
+
+### Key Methods
+
+```rust
+impl QuoteManager {
+    /// Generate next order ID
+    pub fn next_order_id(&mut self) -> OrderId;
+
+    /// Record a submitted order
+    pub fn on_order_submit(
+        &mut self,
+        order_id: OrderId,
+        side: Side,
+        price: Price,
+        quantity: Quantity,
+    );
+
+    /// Handle order acknowledgment
+    pub fn on_order_ack(&mut self, order_id: OrderId);
+
+    /// Handle order rejection
+    pub fn on_order_reject(&mut self, order_id: OrderId);
+
+    /// Handle order fill
+    pub fn on_fill(&mut self, order_id: OrderId, fill_qty: Quantity);
+
+    /// Handle order cancellation
+    pub fn on_cancel(&mut self, order_id: OrderId);
+
+    /// Get total bid quantity
+    pub fn total_bid_quantity(&self) -> Quantity;
+
+    /// Get total ask quantity
+    pub fn total_ask_quantity(&self) -> Quantity;
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:63-164`
+
+## Multi-Level Quoting
+
+Generate quotes at multiple price levels:
+
+```rust
+fn generate_quotes(&mut self, book: &dyn OrderBook, current_time: Timestamp) -> Vec<Order> {
+    let mut orders = Vec::new();
+
+    let mid = match book.mid_price() {
+        Some(m) => m,
+        None => return orders,
+    };
+
+    // Check position limits
+    let position = self.base.position();
+    let can_buy = position < self.config.max_inventory;
+    let can_sell = position > -self.config.max_inventory;
+
+    let (bid_price, ask_price) = self.calculate_quotes(mid);
+
+    // Generate bid orders
+    if can_buy {
+        for level in 0..self.config.num_levels {
+            let price =
+                Price::from_raw(bid_price.raw() - (level as i64 * self.config.tick_size));
+
+            let order_id = self.quotes.next_order_id();
+            let quantity = Quantity::new(self.config.order_size);
+
+            let order = Order::new_limit(
+                order_id,
+                self.instrument_id,
+                Side::Buy,
+                price,
+                quantity,
+                TimeInForce::GTC,
+            );
+
+            self.quotes.on_order_submit(order_id, Side::Buy, price, quantity);
+            orders.push(order);
+        }
+    }
+
+    // Generate ask orders (similar logic)
+    // ...
+
+    orders
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:254-322`
+
+### Level Spacing
+
+With `num_levels = 3` and `tick_size = 25`:
+
+```
+Level 0: bid_price - 0 ticks
+Level 1: bid_price - 1 tick (25 units)
+Level 2: bid_price - 2 ticks (50 units)
+```
+
+## Position Limits
+
+The strategy respects position limits:
+
+```rust
+// Check position limits
+let position = self.base.position();
+let can_buy = position < self.config.max_inventory;
+let can_sell = position > -self.config.max_inventory;
+
+// Only quote on sides where we can trade
+if can_buy {
+    // Generate bid orders
+}
+
+if can_sell {
+    // Generate ask orders
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:266-269`
+
+## Quote Refreshing
+
+Quotes are refreshed periodically:
+
+```rust
+/// Check if quotes need to be refreshed
+fn should_refresh_quotes(&self, current_time: Timestamp) -> bool {
+    current_time.as_nanos() - self.last_quote_time.as_nanos() 
+        >= self.config.refresh_interval_ns
+}
+
+fn on_market_data(&mut self, book: &dyn OrderBook) -> Vec<Order> {
+    // Update base strategy
+    self.base.on_market_data(book);
+
+    if !self.is_ready() {
+        return Vec::new();
+    }
+
+    let current_time = book.timestamp();
+
+    // Check if we need to refresh quotes
+    if self.should_refresh_quotes(current_time) {
+        return self.generate_quotes(book, current_time);
+    }
+
+    Vec::new()
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:224-227, 348-366`
+
+## Canceling Stale Quotes
+
+Orders too far from the best bid/offer are cancelled:
+
+```rust
+fn generate_cancels(&self, book: &dyn OrderBook) -> Vec<OrderId> {
+    let mut cancels = Vec::new();
+
+    if let (Some((best_bid, _)), Some((best_ask, _))) = (book.best_bid(), book.best_ask()) {
+        // Cancel bids too far from BBO
+        for (id, (price, _)) in &self.quotes.bid_orders {
+            let distance = (best_bid.raw() - price.raw()) / self.config.tick_size;
+            if distance > self.config.cancel_distance_ticks {
+                cancels.push(*id);
+            }
+        }
+
+        // Cancel asks too far from BBO
+        for (id, (price, _)) in &self.quotes.ask_orders {
+            let distance = (price.raw() - best_ask.raw()) / self.config.tick_size;
+            if distance > self.config.cancel_distance_ticks {
+                cancels.push(*id);
+            }
+        }
+    }
+
+    cancels
+}
+```
+
+**Location:** `nano-strategy/src/market_maker.rs:229-252`
+
+## Complete Example
+
+```rust
+use nano_strategy::{MarketMakerStrategy, MarketMakerConfig};
+use nano_core::traits::Strategy;
+
+// Configure the market maker
+let config = MarketMakerConfig {
+    base_spread_ticks: 2,
+    inventory_skew_factor: 0.5,
+    max_inventory: 100,
+    order_size: 10,
+    num_levels: 3,
+    min_edge_ticks: 1,
+    cancel_distance_ticks: 10,
+    tick_size: 25,
+    refresh_interval_ns: 100_000_000,
+};
+
+// Create the strategy
+let mut mm = MarketMakerStrategy::new(
+    "btc_market_maker",
+    1, // instrument_id
+    config,
+    12.5, // tick_value
+);
+
+// In your trading loop
+loop {
+    // Get market data
+    let orders = mm.on_market_data(&book);
+
+    // Submit generated orders
+    for order in orders {
+        execution_handler.submit_order(order)?;
+    }
+
+    // Handle fills
+    if let Some(fill) = execution_handler.next_fill() {
+        mm.on_fill(&fill);
+    }
+
+    // Monitor position and P&L
+    println!("Position: {}, P&L: ${:.2}", mm.position(), mm.pnl());
+}
+```
+
+## Monitoring
+
+Access strategy state:
+
+```rust
+// Get current position
+let position = strategy.position();
+
+// Get P&L
+let pnl = strategy.pnl();
+
+// Get fair value estimate
+let fair_value = strategy.fair_value();
+
+// Get quote manager
+let quotes = strategy.quotes();
+let total_bid_qty = quotes.total_bid_quantity();
+let total_ask_qty = quotes.total_ask_quantity();
+let num_bids = quotes.bid_order_ids().len();
+let num_asks = quotes.ask_order_ids().len();
+```
+
+## Best Practices
+
+1. **Start with wider spreads** - Use `base_spread_ticks >= 2` to ensure profitability
+
+2. **Tune inventory skewing** - Adjust `inventory_skew_factor` based on market volatility:
+   - Higher volatility → stronger skewing (0.7-1.0)
+   - Lower volatility → gentler skewing (0.3-0.5)
+
+3. **Set appropriate position limits** - Don't exceed your risk tolerance:
+   ```rust
+   max_inventory: calculate_max_position(capital, risk_per_contract)
+   ```
+
+4. **Monitor fill rates** - If fills are too low, tighten spreads or increase levels
+
+5. **Use appropriate refresh intervals** - Balance between:
+   - Faster updates (50-100ms) for active markets
+   - Slower updates (200-500ms) for less liquid markets
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Signal Generation" icon="signal" href="/strategies/signal-generation">
+    Add ML-based signals to your market maker
+  </Card>
+  <Card title="RL Strategies" icon="brain" href="/strategies/rl-strategies">
+    Train RL agents for optimal market making
+  </Card>
+</CardGroup>

@@ -1,0 +1,128 @@
+---
+title: Introduction
+description: Learn about NanoARB, a production-grade high-frequency trading engine for CME futures markets
+---
+
+## What is NanoARB?
+
+NanoARB is a nanosecond-level high-frequency trading engine designed for CME futures markets (ES, NQ). It combines cutting-edge machine learning models with ultra-low-latency Rust infrastructure to achieve institutional-grade performance for statistical arbitrage and market-making strategies.
+
+Built entirely in Rust with zero Python at runtime, NanoARB delivers sub-microsecond tick-to-trade latency while maintaining production-grade reliability and realistic backtesting capabilities.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Sub-microsecond inference" icon="bolt">
+    < 800ns end-to-end tick-to-trade latency with median total latency of 780ns
+  </Card>
+  <Card title="Production Rust codebase" icon="rust">
+    Zero Python at runtime, built for maximum performance and reliability
+  </Card>
+  <Card title="State-of-the-art ML" icon="brain">
+    Mamba State Space Models for 10-50x faster inference than Transformers
+  </Card>
+  <Card title="Realistic backtesting" icon="chart-line">
+    Latency simulation, queue position modeling, and adverse selection
+  </Card>
+</CardGroup>
+
+### Performance benchmarks
+
+Measured on AMD EPYC 7763 (AWS c6a.8xlarge):
+
+| Operation | Median | P95 | P99 |
+| --- | --- | --- | --- |
+| LOB Update | 45ns | 62ns | 78ns |
+| Feature Extraction | 120ns | 145ns | 168ns |
+| Model Inference | 580ns | 720ns | 890ns |
+| **Total Tick-to-Trade** | **780ns** | **950ns** | **1.2μs** |
+
+### Trading capabilities
+
+**Data Pipeline**
+- CME MDP 3.0 binary protocol parser with SBE encoding
+- Zero-copy message parsing using `nom`
+- Synthetic data generator for development and testing
+- Historical replay support
+
+**Order Book Engine**
+- 20-level price aggregation with O(log n) updates using `BTreeMap`
+- Real-time feature extraction: Microprice, OFI, VPIN, Book Imbalance
+- Tensor serialization for ML inference
+
+**ML Models**
+- **Mamba-LOB**: State Space Model for sequence modeling (~500K parameters, &lt;800ns inference)
+- **Decision Transformer**: Offline RL for market-making
+- **IQL**: Implicit Q-Learning with expectile regression
+- ONNX export for Rust inference via `ort`
+
+**Backtesting**
+- Event-driven architecture with configurable latency models
+- Realistic fill simulation with queue position tracking
+- Walk-forward and purged cross-validation
+
+## Architecture overview
+
+NanoARB is built as a modular Rust workspace with the following crates:
+
+| Crate | Description |
+| --- | --- |
+| `nano-core` | Core types, traits, error handling |
+| `nano-feed` | CME MDP 3.0 parser, synthetic data generator |
+| `nano-lob` | Order book reconstruction, feature extraction |
+| `nano-model` | ONNX inference, signal generation |
+| `nano-backtest` | Event-driven backtesting engine |
+| `nano-strategy` | Trading strategies, RL environment |
+| `nano-gateway` | Entry point, metrics, configuration |
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         NanoARB Architecture                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐           │
+│  │  CME MDP 3.0 │───▶│  nano-feed   │───▶│   nano-lob   │           │
+│  │  Market Data │    │   Parser     │    │  Order Book  │           │
+│  └──────────────┘    └──────────────┘    └──────┬───────┘           │
+│                                                  │                  │
+│                                                  ▼                  │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐           │
+│  │  nano-model  │◀───│   Features   │◀───│   Snapshot   │           │
+│  │ ONNX Infer.  │    │  Extraction  │    │ Ring Buffer  │           │
+│  └──────┬───────┘    └──────────────┘    └──────────────┘           │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐           │
+│  │nano-strategy │───▶│nano-backtest │───▶│ nano-gateway │           │
+│  │  MM / Signal │    │   Engine     │    │   Metrics    │           │
+│  └──────────────┘    └──────────────┘    └──────────────┘           │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Who should use NanoARB?
+
+NanoARB is designed for:
+
+- **Quantitative researchers** developing high-frequency trading strategies
+- **Algorithmic traders** who need realistic backtesting with sub-microsecond precision
+- **HFT developers** building low-latency trading systems in Rust
+- **Academic researchers** studying market microstructure and ML for trading
+- **Trading firms** evaluating market-making and statistical arbitrage strategies
+
+<Warning>
+  **Educational and research purposes only**
+  
+  This software is for educational and research purposes only. It is not financial advice. Trading futures involves substantial risk of loss. Past performance does not indicate future results.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get NanoARB up and running in minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation instructions and requirements
+  </Card>
+</CardGroup>

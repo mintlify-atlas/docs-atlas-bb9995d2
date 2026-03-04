@@ -1,0 +1,439 @@
+---
+title: "LatencyConfig"
+description: "Latency simulation configuration for realistic backtesting"
+---
+
+## Overview
+
+The `LatencyConfig` struct defines latency parameters for simulating realistic network and exchange delays in backtests. Proper latency modeling is critical for HFT strategy validation.
+
+Source: `nano-backtest/src/config.rs`
+
+## LatencyConfig
+
+```rust
+pub struct LatencyConfig {
+    pub order_latency_ns: u64,
+    pub market_data_latency_ns: u64,
+    pub ack_latency_ns: u64,
+    pub jitter_ns: u64,
+    pub use_random_jitter: bool,
+}
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `order_latency_ns` | `u64` | 100,000 | Order submission latency (nanoseconds) |
+| `market_data_latency_ns` | `u64` | 50,000 | Market data reception latency (ns) |
+| `ack_latency_ns` | `u64` | 100,000 | Order acknowledgment latency (ns) |
+| `jitter_ns` | `u64` | 10,000 | Latency jitter std deviation (ns) |
+| `use_random_jitter` | `bool` | `true` | Enable random jitter simulation |
+
+## Constructor
+
+### `default`
+
+Creates a default latency configuration modeling co-location environment.
+
+```rust
+impl Default for LatencyConfig
+```
+
+**Default values:**
+- Order latency: 100μs (typical colo to exchange)
+- Market data: 50μs (faster than orders)
+- Acknowledgment: 100μs (round-trip to exchange)
+- Jitter: 10μs standard deviation
+- Random jitter: enabled
+
+**Example:**
+```rust
+use nano_backtest::config::LatencyConfig;
+
+let latency = LatencyConfig::default();
+assert_eq!(latency.order_latency_ns, 100_000);
+```
+
+## Field Details
+
+### order_latency_ns
+
+Time from order submission to arrival at exchange.
+
+**Units:** Nanoseconds (1 microsecond = 1,000 nanoseconds)
+
+**Represents:**
+- Network transmission time
+- Gateway processing
+- Exchange ingress processing
+
+**Example:**
+```rust
+let latency = LatencyConfig {
+    order_latency_ns: 50_000,  // 50 microseconds
+    ..Default::default()
+};
+```
+
+**Typical Values by Environment:**
+
+| Environment | Latency | Notes |
+|-------------|---------|-------|
+| Aurora (CME colo) | 5-10μs | Direct exchange connection |
+| NY5 colo | 50-100μs | Generic NY data center |
+| Cross-venue | 100-500μs | Different exchange locations |
+| Retail (US) | 1-10ms | Internet connection |
+| International | 10-100ms | Trans-oceanic |
+
+**Conversion helpers:**
+```rust
+// Common time unit conversions
+const MICROSECOND_NS: u64 = 1_000;
+const MILLISECOND_NS: u64 = 1_000_000;
+
+let latency_50us = 50 * MICROSECOND_NS;     // 50,000 ns
+let latency_1ms = 1 * MILLISECOND_NS;       // 1,000,000 ns
+```
+
+### market_data_latency_ns
+
+Time from exchange event to market data reception.
+
+**Units:** Nanoseconds
+
+**Represents:**
+- Market data feed transmission
+- Decoder processing time
+- Network delay
+
+**Typical relationship:** Usually faster than order latency (optimized path)
+
+**Example:**
+```rust
+let latency = LatencyConfig {
+    order_latency_ns: 100_000,      // 100μs
+    market_data_latency_ns: 50_000,  // 50μs (faster)
+    ..Default::default()
+};
+```
+
+**Typical Values:**
+- Aurora (CME): 2-5μs
+- Colo: 25-50μs
+- Retail: 0.5-5ms
+
+### ack_latency_ns
+
+Time from exchange processing to acknowledgment reception.
+
+**Units:** Nanoseconds
+
+**Represents:**
+- Exchange order processing
+- Return network path
+- Gateway processing
+
+**Typical relationship:** Similar to order latency (round-trip)
+
+**Example:**
+```rust
+let latency = LatencyConfig {
+    order_latency_ns: 100_000,   // 100μs outbound
+    ack_latency_ns: 100_000,     // 100μs return path
+    ..Default::default()
+};
+
+// Total round-trip: ~200μs + exchange processing
+```
+
+**Typical Values:**
+- Colo: 50-100μs
+- Remote: 1-10ms
+
+### jitter_ns
+
+Standard deviation of latency variability (jitter).
+
+**Units:** Nanoseconds
+
+**Purpose:** Simulates realistic network variance
+
+**Distribution:** Normal distribution (when `use_random_jitter: true`)
+
+**Example:**
+```rust
+let latency = LatencyConfig {
+    order_latency_ns: 100_000,  // 100μs mean
+    jitter_ns: 10_000,          // 10μs std dev
+    use_random_jitter: true,
+    ..Default::default()
+};
+
+// Actual latencies will be approximately:
+// - 68% between 90-110μs (1 std dev)
+// - 95% between 80-120μs (2 std dev)
+// - 99.7% between 70-130μs (3 std dev)
+```
+
+**Typical Values:**
+- Low jitter (fiber): 1-5μs
+- Medium jitter (colo): 5-20μs
+- High jitter (internet): 50-500μs
+
+### use_random_jitter
+
+Enables random jitter simulation.
+
+**Values:**
+- `true` (default): Adds random jitter to each latency
+- `false`: Deterministic latencies (for reproducibility)
+
+**Purpose:**
+- Realistic simulation: Models network variance
+- Stress testing: See how strategy handles variable latency
+- Reproducibility: Disable for deterministic backtests
+
+**Example:**
+```rust
+// Realistic with jitter
+let realistic = LatencyConfig {
+    order_latency_ns: 100_000,
+    jitter_ns: 10_000,
+    use_random_jitter: true,
+    ..Default::default()
+};
+
+// Deterministic without jitter
+let deterministic = LatencyConfig {
+    order_latency_ns: 100_000,
+    jitter_ns: 10_000,
+    use_random_jitter: false,  // Fixed latency
+    ..Default::default()
+};
+```
+
+## Configuration Presets
+
+### Aurora (CME Primary Colo)
+
+Ultra-low latency at CME's Aurora data center.
+
+```rust
+let aurora = LatencyConfig {
+    order_latency_ns: 5_000,      // 5μs
+    market_data_latency_ns: 2_000, // 2μs
+    ack_latency_ns: 6_000,         // 6μs
+    jitter_ns: 1_000,              // 1μs
+    use_random_jitter: true,
+};
+```
+
+### Generic Colo
+
+Typical co-location facility.
+
+```rust
+let colo = LatencyConfig {
+    order_latency_ns: 50_000,      // 50μs
+    market_data_latency_ns: 25_000, // 25μs
+    ack_latency_ns: 60_000,         // 60μs
+    jitter_ns: 5_000,               // 5μs
+    use_random_jitter: true,
+};
+```
+
+### Remote/Cloud
+
+Cloud-based or remote trading.
+
+```rust
+let remote = LatencyConfig {
+    order_latency_ns: 500_000,      // 500μs
+    market_data_latency_ns: 300_000, // 300μs
+    ack_latency_ns: 600_000,         // 600μs
+    jitter_ns: 50_000,               // 50μs
+    use_random_jitter: true,
+};
+```
+
+### Retail/Internet
+
+Typical retail trader connection.
+
+```rust
+let retail = LatencyConfig {
+    order_latency_ns: 5_000_000,      // 5ms
+    market_data_latency_ns: 3_000_000, // 3ms
+    ack_latency_ns: 6_000_000,         // 6ms
+    jitter_ns: 500_000,                // 500μs
+    use_random_jitter: true,
+};
+```
+
+### Conservative (Pessimistic)
+
+Worst-case latency for stress testing.
+
+```rust
+let conservative = LatencyConfig {
+    order_latency_ns: 200_000,      // 200μs
+    market_data_latency_ns: 100_000, // 100μs
+    ack_latency_ns: 250_000,         // 250μs
+    jitter_ns: 50_000,               // 50μs (high variance)
+    use_random_jitter: true,
+};
+```
+
+### Optimistic (Best-case)
+
+Best-case latency for strategy research.
+
+```rust
+let optimistic = LatencyConfig {
+    order_latency_ns: 25_000,      // 25μs
+    market_data_latency_ns: 10_000, // 10μs
+    ack_latency_ns: 30_000,         // 30μs
+    jitter_ns: 2_000,               // 2μs
+    use_random_jitter: true,
+};
+```
+
+## LatencySimulator Usage
+
+The `LatencySimulator` uses this configuration:
+
+```rust
+use nano_backtest::latency::LatencySimulator;
+use nano_backtest::config::LatencyConfig;
+use nano_core::types::Timestamp;
+
+// Create simulator from config
+let config = LatencyConfig {
+    order_latency_ns: 100_000,
+    market_data_latency_ns: 50_000,
+    ack_latency_ns: 100_000,
+    jitter_ns: 10_000,
+    use_random_jitter: true,
+};
+
+let mut sim = LatencySimulator::from_config(&config);
+
+// Calculate latencies
+let submit_time = Timestamp::now();
+let arrival_time = sim.order_arrival_time(submit_time);
+let latency = arrival_time.as_nanos() - submit_time.as_nanos();
+
+println!("Order latency: {}μs", latency / 1000);
+```
+
+## Latency Impact Analysis
+
+Understand how latency affects strategy performance:
+
+```rust
+use nano_backtest::{BacktestConfig, BacktestEngine};
+
+// Test multiple latency scenarios
+let latencies = vec![10_000, 50_000, 100_000, 200_000, 500_000];
+
+for order_latency in latencies {
+    let config = BacktestConfig {
+        latency: LatencyConfig {
+            order_latency_ns: order_latency,
+            market_data_latency_ns: order_latency / 2,
+            ack_latency_ns: order_latency,
+            jitter_ns: order_latency / 10,
+            use_random_jitter: true,
+        },
+        ..BacktestConfig::default()
+    };
+    
+    let mut engine = BacktestEngine::new(config);
+    engine.run(&mut strategy.clone());
+    
+    let metrics = engine.metrics();
+    println!("Latency: {}μs, P&L: ${:.2}, Sharpe: {:.2}",
+        order_latency / 1000,
+        metrics.total_pnl,
+        engine.stats().sharpe_ratio);
+}
+```
+
+## Time Unit Reference
+
+```rust
+// Time unit constants for readability
+const NS_PER_US: u64 = 1_000;           // nanoseconds per microsecond
+const NS_PER_MS: u64 = 1_000_000;       // nanoseconds per millisecond
+const NS_PER_SEC: u64 = 1_000_000_000;  // nanoseconds per second
+
+// Usage examples
+let latency = LatencyConfig {
+    order_latency_ns: 50 * NS_PER_US,     // 50 microseconds
+    market_data_latency_ns: 25 * NS_PER_US,  // 25 microseconds
+    ack_latency_ns: 60 * NS_PER_US,       // 60 microseconds
+    jitter_ns: 5 * NS_PER_US,             // 5 microseconds
+    use_random_jitter: true,
+};
+```
+
+## Best Practices
+
+1. **Measure Reality**: Benchmark your actual latencies before backtesting
+
+2. **Test Multiple Scenarios**: Run backtests with optimistic, realistic, and pessimistic latencies
+
+3. **Include Jitter**: Always enable random jitter for realistic results
+
+4. **Conservative for Live**: Use pessimistic latencies when validating for live trading
+
+5. **Document Assumptions**: Record what infrastructure your latencies model
+
+6. **Asymmetric Latencies**: Market data is often faster than order submission
+
+7. **Latency Matters**: For HFT, 10μs difference can dramatically impact performance
+
+8. **Round-Trip Time**: Total latency = order + exchange processing + ack
+
+## Complete Example
+
+```rust
+use nano_backtest::config::{BacktestConfig, LatencyConfig};
+use nano_backtest::BacktestEngine;
+
+// Define latency for colo environment
+let latency_config = LatencyConfig {
+    order_latency_ns: 75_000,      // 75μs
+    market_data_latency_ns: 40_000, // 40μs
+    ack_latency_ns: 80_000,         // 80μs
+    jitter_ns: 8_000,               // 8μs std dev
+    use_random_jitter: true,
+};
+
+// Create backtest config
+let config = BacktestConfig {
+    initial_capital: 1_000_000.0,
+    latency: latency_config,
+    ..BacktestConfig::default()
+};
+
+// Run backtest
+let mut engine = BacktestEngine::new(config);
+engine.run(&mut strategy);
+
+// Analyze results
+let metrics = engine.metrics();
+println!("Backtest with {}μs latency:", 
+    config.latency.order_latency_ns / 1000);
+println!("  P&L: ${:.2}", metrics.total_pnl);
+println!("  Trades: {}", metrics.num_trades);
+println!("  Sharpe: {:.2}", engine.stats().sharpe_ratio);
+```
+
+## See Also
+
+- [LatencySimulator](/api/backtest/latency) - Latency simulation implementation
+- [BacktestConfig](/api/backtest/config) - Complete configuration
+- [BacktestEngine](/api/backtest/engine) - Running backtests

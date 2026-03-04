@@ -1,80 +1,326 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get NanoARB up and running in minutes with this step-by-step guide
 ---
 
-## Get started in three steps
+## Quick start
 
-Get your documentation site running locally and make your first customization.
+This guide will help you get NanoARB running locally with synthetic market data in just a few minutes.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+Before you begin, make sure you have:
+
+- **Rust 1.75+** — [Install Rust](https://rustup.rs/)
+- **Node.js 18+** and **pnpm** — For the dashboard UI
+- **Git** — To clone the repository
+
+<Note>
+  Optional: Docker Desktop for Prometheus/Grafana monitoring
+</Note>
+
+## One-command setup
+
+The fastest way to get started is using the provided startup script:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/dhir1007/nanoARB.git
+    cd nanoARB
+    ```
+  </Step>
+
+  <Step title="Start everything">
+    ```bash
+    ./start.sh
+    ```
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    This single command will:
+    - Build the Rust trading engine in release mode
+    - Install UI dependencies (if needed)
+    - Start the trading engine on port 9090
+    - Launch the dashboard UI on port 3000
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    Expected output:
+    ```bash
+    ============================================
+      NanoARB - Starting Full Stack
+    ============================================
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    [1/3] Building Rust trading engine (release)...
+    [2/3] Installing UI dependencies...
+    [3/3] Starting services...
+    
+      Rust Engine   : http://localhost:9090  (PID 12345)
+      Metrics       : http://localhost:9090/metrics
+      Health        : http://localhost:9090/health
+      API State     : http://localhost:9090/api/state
+      SSE Stream    : http://localhost:9090/api/stream
+      Dashboard UI  : http://localhost:3000   (PID 12346)
+    
+    ============================================
+      All services running. Press Ctrl+C to stop.
+    ============================================
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Access the dashboard">
+    Open your browser to [http://localhost:3000](http://localhost:3000) to see the real-time trading dashboard.
+    
+    The dashboard shows:
+    - Live order book with 15 levels
+    - Real-time price chart with ML predictions
+    - Trade history and P&L curve
+    - Latency metrics and performance statistics
+    - Risk monitoring and position tracking
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Stop the services">
+    Press `Ctrl+C` in the terminal, or run:
+    ```bash
+    ./stop.sh
+    ```
+  </Step>
+</Steps>
 
-### Step 3: Go live
+## Manual setup
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+If you prefer more control, you can start services manually:
+
+<Steps>
+  <Step title="Build the Rust engine">
+    ```bash
+    cargo build --release
+    ```
+    
+    This compiles the trading engine with maximum optimizations (LTO, single codegen unit).
+  </Step>
+
+  <Step title="Start the trading engine">
+    ```bash
+    ./target/release/nanoarb
+    ```
+    
+    Or run in the background:
+    ```bash
+    ./target/release/nanoarb &
+    ```
+    
+    The engine will start in simulation mode by default, generating synthetic market data.
+  </Step>
+
+  <Step title="Start the dashboard UI (optional)">
+    In a new terminal:
+    ```bash
+    cd nano-arb-ui-development
+    pnpm install
+    pnpm dev
+    ```
+    
+    The UI will be available at [http://localhost:3000](http://localhost:3000).
+  </Step>
+</Steps>
+
+## Running your first backtest
+
+NanoARB includes a powerful backtesting engine that simulates realistic market conditions.
+
+### CLI backtest
+
+Run a backtest using synthetic data:
+
+```bash
+cargo run --release --bin nanoarb -- --backtest
+```
+
+Expected output:
+```
+INFO Starting NanoARB Trading Engine v0.1.0
+INFO Running in backtest mode
+INFO Using synthetic data for backtest
+INFO Generated 100000 synthetic events
+INFO Backtest completed in 2.3s
+INFO Events processed: 100000
+INFO Total P&L: $892.45
+INFO Max Drawdown: 3.2%
+INFO Sharpe Ratio: 4.8
+INFO Win Rate: 54.3%
+INFO Profit Factor: 2.3
+```
+
+### API backtest
+
+While the engine is running, you can trigger backtests via the REST API:
+
+```bash
+curl -X POST http://localhost:9090/api/backtest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "ES",
+    "startDate": "2024-01-01",
+    "endDate": "2024-12-31",
+    "initialCapital": 1000000,
+    "spreadMultiplier": 1.0,
+    "inventoryLimit": 50,
+    "skewFactor": 0.5,
+    "useML": true,
+    "maxDrawdown": 5.0,
+    "positionLimit": 50
+  }'
+```
+
+### Custom configuration
+
+Create a `config.toml` file to customize backtest parameters:
+
+```toml config.toml
+[trading]
+live_enabled = false
+symbols = ["ESH24"]
+initial_capital = 1000000.0
+max_position = 50
+max_order_size = 10
+
+[latency]
+order_latency_ns = 100000
+market_data_latency_ns = 50000
+jitter_ns = 10000
+
+[risk]
+max_position = 50
+max_drawdown_pct = 0.06
+max_daily_loss = 100000.0
+enable_kill_switch = true
+
+[fees]
+maker_fee = 0.25
+taker_fee = 0.85
+exchange_fee = 1.18
+```
+
+Then run:
+```bash
+cargo run --release --bin nanoarb -- --config config.toml --backtest
+```
+
+## Available endpoints
+
+Once the engine is running, the following HTTP endpoints are available:
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/health` | GET | Health check |
+| `/metrics` | GET | Prometheus metrics |
+| `/api/state` | GET | Full engine state (JSON) |
+| `/api/stream` | GET | Server-Sent Events stream |
+| `/api/backtest` | POST | Run backtest with custom parameters |
+
+### Example: Get current state
+
+```bash
+curl http://localhost:9090/api/state | jq
+```
+
+Response includes:
+- Order book snapshot (15 levels)
+- Current position and P&L
+- Recent trades
+- Latency metrics
+- Risk alerts
+
+## Monitoring with Grafana
+
+For advanced monitoring, you can launch Prometheus and Grafana:
+
+```bash
+cd docker
+docker compose -f docker-compose-monitoring.yml up -d
+```
+
+Access Grafana at [http://localhost:3000](http://localhost:3000) (login: `admin` / `nanoarb`).
+
+The pre-configured dashboard shows:
+- Real-time P&L and Sharpe ratio
+- Latency histograms (p50, p95, p99)
+- Order flow and fill rates
+- Position and inventory tracking
+
+To stop monitoring:
+```bash
+docker compose -f docker-compose-monitoring.yml down
+```
+
+## Running tests
+
+Verify your installation by running the test suite:
+
+```bash
+# Run all tests
+cargo test --workspace
+
+# Run specific crate tests
+cargo test -p nano-lob
+
+# Run benchmarks
+cargo bench --workspace
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation guide and troubleshooting
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference">
+    Explore the full API documentation
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Port already in use">
+    If port 9090 or 3000 is already in use:
+    
+    ```bash
+    # Kill processes on ports
+    lsof -ti:9090 | xargs kill -9
+    lsof -ti:3000 | xargs kill -9
+    ```
+    
+    Or specify a custom port:
+    ```bash
+    PORT=8080 ./target/release/nanoarb
+    ```
+  </Accordion>
+
+  <Accordion title="Rust version too old">
+    NanoARB requires Rust 1.75+. Update Rust:
+    
+    ```bash
+    rustup update stable
+    rustc --version
+    ```
+  </Accordion>
+
+  <Accordion title="pnpm not found">
+    Install pnpm:
+    
+    ```bash
+    npm install -g pnpm
+    ```
+  </Accordion>
+
+  <Accordion title="Build fails with linker errors">
+    On Linux, you may need to install additional dependencies:
+    
+    ```bash
+    # Ubuntu/Debian
+    sudo apt-get install build-essential pkg-config libssl-dev
+    
+    # Fedora/RHEL
+    sudo dnf install gcc gcc-c++ make openssl-devel
+    ```
+  </Accordion>
+</AccordionGroup>

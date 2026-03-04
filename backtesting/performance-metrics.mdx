@@ -1,0 +1,483 @@
+---
+title: Performance Metrics
+description: Understand backtest metrics including Sharpe ratio, drawdown, win rate, and profit factor
+---
+
+The backtesting engine provides comprehensive performance metrics and statistics to evaluate strategy quality.
+
+## BacktestMetrics
+
+The primary metrics structure is defined in `nano-backtest/src/metrics.rs:10-52`.
+
+### Core Metrics
+
+```rust
+pub struct BacktestMetrics {
+    pub total_pnl: f64,           // Total profit/loss
+    pub realized_pnl: f64,        // Realized P&L from closed trades
+    pub unrealized_pnl: f64,      // Mark-to-market unrealized P&L
+    pub total_fees: f64,          // Total fees paid
+    pub num_trades: u32,          // Number of round-trip trades
+    pub winning_trades: u32,      // Number of profitable trades
+    pub losing_trades: u32,       // Number of losing trades
+    pub gross_profit: f64,        // Sum of all winning trades
+    pub gross_loss: f64,          // Sum of all losing trades
+    pub max_drawdown_pct: f64,    // Maximum drawdown percentage
+    pub max_drawdown_abs: f64,    // Maximum drawdown in dollars
+    pub peak_pnl: f64,            // Peak P&L reached
+    pub total_volume: u64,        // Total contracts traded
+    // ... additional metrics
+}
+```
+
+## Accessing Metrics
+
+From `engine.rs:325-329`:
+
+```rust
+let metrics = engine.metrics();
+
+println!("Total P&L: ${:.2}", metrics.total_pnl);
+println!("Realized P&L: ${:.2}", metrics.realized_pnl);
+println!("Total Fees: ${:.2}", metrics.total_fees);
+println!("Net P&L: ${:.2}", metrics.total_pnl - metrics.total_fees);
+```
+
+## Key Performance Indicators
+
+### Win Rate
+
+Percentage of profitable trades (`metrics.rs:62-68`):
+
+```rust
+let win_rate = metrics.win_rate();
+println!("Win Rate: {:.1}%", win_rate * 100.0);
+
+// Calculation
+win_rate = winning_trades / total_trades
+```
+
+**Interpretation:**
+- **50%+**: Strategy has edge (for equal-sized trades)
+- **40-50%**: Acceptable if winners > losers
+- **&lt;40%**: Likely unprofitable unless avg winner >> avg loser
+
+### Profit Factor
+
+Ratio of gross profit to gross loss (`metrics.rs:71-77`):
+
+```rust
+let profit_factor = metrics.profit_factor();
+println!("Profit Factor: {:.2}", profit_factor);
+
+// Calculation
+profit_factor = gross_profit / abs(gross_loss)
+```
+
+**Interpretation:**
+- **>2.0**: Excellent strategy
+- **1.5-2.0**: Good strategy
+- **1.0-1.5**: Marginal, needs improvement
+- **&lt;1.0**: Unprofitable
+
+### Average Trade P&L
+
+Mean profit per trade (`metrics.rs:80-86`):
+
+```rust
+let avg_pnl = metrics.avg_trade_pnl();
+let avg_winner = metrics.avg_winning_trade();
+let avg_loser = metrics.avg_losing_trade();
+
+println!("Avg Trade: ${:.2}", avg_pnl);
+println!("Avg Winner: ${:.2}", avg_winner);
+println!("Avg Loser: ${:.2}", avg_loser);
+```
+
+**Interpretation:**
+- Average trade should be significantly positive after fees
+- For HFT: Even $1-$5 per round-trip can be profitable at scale
+- Avg winner should typically be larger than avg loser
+
+### Maker Ratio
+
+Percentage of fills that added liquidity (`metrics.rs:107-114`):
+
+```rust
+let maker_ratio = metrics.maker_ratio();
+println!("Maker Ratio: {:.1}%", maker_ratio * 100.0);
+
+// Calculation
+maker_ratio = maker_fills / (maker_fills + taker_fills)
+```
+
+**Interpretation:**
+- **>80%**: Excellent for fee optimization
+- **60-80%**: Good maker-taker balance
+- **&lt;50%**: High taker fees may erode profits
+
+For CME futures, maker rebates vs taker fees can be $0.60+ difference per contract.
+
+## Maximum Drawdown
+
+### Drawdown Calculation
+
+From `metrics.rs:146-167`:
+
+```rust
+// Percentage drawdown
+let max_dd_pct = metrics.max_drawdown_pct;
+println!("Max Drawdown: {:.2}%", max_dd_pct * 100.0);
+
+// Absolute drawdown
+let max_dd_abs = metrics.max_drawdown_abs;
+println!("Max Drawdown: ${:.2}", max_dd_abs);
+
+// Calculation
+drawdown = (peak_pnl - current_pnl) / peak_pnl
+```
+
+### Drawdown Tracking
+
+The engine continuously updates drawdown (`metrics.rs:156-166`):
+
+```rust
+if total_pnl > peak_pnl {
+    peak_pnl = total_pnl;  // New peak
+}
+
+let drawdown = peak_pnl - total_pnl;
+let drawdown_pct = drawdown / peak_pnl;
+
+if drawdown_pct > max_drawdown_pct {
+    max_drawdown_pct = drawdown_pct;  // New max drawdown
+}
+```
+
+**Interpretation:**
+- **&lt;5%**: Excellent risk management
+- **5-10%**: Good for HFT strategies
+- **10-20%**: Acceptable for lower-frequency strategies
+- **>20%**: High risk, review strategy and risk limits
+
+<Warning>
+High drawdowns can trigger the kill switch if `max_drawdown_pct` is exceeded in the risk configuration.
+</Warning>
+
+## Advanced Statistics
+
+The `PerformanceStats` struct (`metrics.rs:186-208`) provides deeper analytics.
+
+### Sharpe Ratio
+
+Risk-adjusted return metric (`metrics.rs:260-275`):
+
+```rust
+let sharpe = stats.sharpe_ratio;
+println!("Sharpe Ratio: {:.2}", sharpe);
+
+// Calculation (annualized)
+mean_daily_return = mean(daily_returns)
+std_daily_return = std_dev(daily_returns)
+sharpe = (mean / std) * sqrt(252)  // 252 trading days
+```
+
+**Interpretation:**
+- **>3.0**: Excellent (rare for real strategies)
+- **2.0-3.0**: Very good
+- **1.0-2.0**: Good
+- **&lt;1.0**: Poor risk-adjusted returns
+
+HFT strategies often achieve Sharpe ratios of 2-4 due to low volatility and consistent returns.
+
+### Sortino Ratio
+
+Downside risk-adjusted return (`metrics.rs:278-299`):
+
+```rust
+let sortino = stats.sortino_ratio;
+println!("Sortino Ratio: {:.2}", sortino);
+
+// Calculation (annualized)
+mean_return = mean(daily_returns)
+downside_std = std_dev(negative_returns_only)
+sortino = (mean / downside_std) * sqrt(252)
+```
+
+**Interpretation:**
+- Similar to Sharpe, but only penalizes downside volatility
+- Better metric for asymmetric return distributions
+- Higher Sortino than Sharpe indicates positive skew
+
+### Calmar Ratio
+
+Return relative to maximum drawdown (`metrics.rs:301-309`):
+
+```rust
+let calmar = stats.calmar_ratio;
+println!("Calmar Ratio: {:.2}", calmar);
+
+// Calculation
+annual_return = mean(daily_returns) * 252
+calmar = annual_return / max_drawdown_pct
+```
+
+**Interpretation:**
+- **>3.0**: Excellent return/drawdown profile
+- **1.0-3.0**: Good
+- **&lt;1.0**: Returns don't justify drawdown risk
+
+### Consecutive Wins/Losses
+
+Track winning and losing streaks (`metrics.rs:311-332`):
+
+```rust
+let max_wins = stats.max_consecutive_wins;
+let max_losses = stats.max_consecutive_losses;
+
+println!("Max Consecutive Wins: {}", max_wins);
+println!("Max Consecutive Losses: {}", max_losses);
+```
+
+**Interpretation:**
+- Long losing streaks indicate strategy may need adjustment
+- Very long winning streaks may indicate overfitting
+- Ratio should be reasonable (e.g., max_wins/max_losses ≈ 2-3)
+
+### Recovery Factor
+
+Ability to recover from drawdowns (`metrics.rs:334-342`):
+
+```rust
+let recovery = stats.recovery_factor;
+println!("Recovery Factor: {:.2}", recovery);
+
+// Calculation
+total_return_pct = total_pnl / initial_capital
+recovery_factor = total_return_pct / max_drawdown_pct
+```
+
+**Interpretation:**
+- **>5.0**: Strong recovery capability
+- **2.0-5.0**: Moderate recovery
+- **&lt;2.0**: Slow recovery from drawdowns
+
+## Equity Curve Analysis
+
+The equity curve tracks cumulative P&L over time (`metrics.rs:235-238`):
+
+```rust
+let equity_curve = stats.equity_curve;
+let timestamps = stats.equity_timestamps;
+
+// Plot or analyze equity progression
+for (i, (&timestamp, &pnl)) in timestamps.iter().zip(equity_curve.iter()).enumerate() {
+    println!("[{}] {}: ${:.2}", i, timestamp, pnl);
+}
+```
+
+### Equity Curve Characteristics
+
+**Smooth Upward Trend:**
+```
+    ___----
+  _/
+-/
+```
+Ideal - consistent positive returns with low volatility.
+
+**Volatile but Positive:**
+```
+  /\  /\  /\
+ /  \/  \/
+```
+Positive but risky - high variance in returns.
+
+**Drawdown Pattern:**
+```
+---\___   _____
+        \_/
+```
+Periods of losses - analyze what caused drawdown.
+
+## Volume and Fill Analysis
+
+From `metrics.rs:36-50`:
+
+```rust
+// Trading volume
+let total_volume = metrics.total_volume;
+let buy_fills = metrics.buy_fills;
+let sell_fills = metrics.sell_fills;
+
+println!("Total Volume: {} contracts", total_volume);
+println!("Buy Fills: {}", buy_fills);
+println!("Sell Fills: {}", sell_fills);
+
+// Liquidity provision
+let maker_fills = metrics.maker_fills;
+let taker_fills = metrics.taker_fills;
+
+println!("Maker Fills: {}", maker_fills);
+println!("Taker Fills: {}", taker_fills);
+println!("Maker Ratio: {:.1}%", metrics.maker_ratio() * 100.0);
+```
+
+**Volume Analysis:**
+- High volume strategies can profit with small edge per trade
+- Unbalanced buy/sell may indicate directional bias
+- High maker ratio reduces total trading costs
+
+## Time-Based Metrics
+
+From `metrics.rs:170-182`:
+
+```rust
+// Backtest duration
+let duration_secs = metrics.duration_secs();
+let duration_hours = duration_secs / 3600.0;
+let duration_days = duration_hours / 24.0;
+
+println!("Backtest Duration: {:.2} hours", duration_hours);
+
+// Trades per hour
+let trades_per_hour = metrics.num_trades as f64 / duration_hours;
+println!("Trade Frequency: {:.1} trades/hour", trades_per_hour);
+
+// Average P&L per hour
+let pnl_per_hour = metrics.total_pnl / duration_hours;
+println!("P&L Rate: ${:.2}/hour", pnl_per_hour);
+```
+
+## Rolling Statistics
+
+The `RollingStats` calculator (`metrics.rs:346-442`) tracks windowed metrics:
+
+```rust
+use nano_backtest::metrics::RollingStats;
+
+// Create 100-trade rolling window
+let mut rolling = RollingStats::new(100);
+
+for trade_pnl in trade_pnls {
+    rolling.add(trade_pnl);
+    
+    if rolling.is_full() {
+        let mean = rolling.mean();
+        let std = rolling.std_dev();
+        let sharpe = rolling.sharpe();
+        
+        println!("Rolling Sharpe (100 trades): {:.2}", sharpe);
+    }
+}
+```
+
+**Use Cases:**
+- Detect strategy degradation over time
+- Monitor consistency of returns
+- Adaptive risk management based on recent performance
+
+## Interpreting Results
+
+### Example Good Strategy
+
+```
+Total P&L: $127,450.00
+Realized P&L: $125,320.00
+Total Fees: $18,250.00
+Net P&L: $109,200.00
+
+Num Trades: 1,247
+Winning Trades: 789 (63.3%)
+Losing Trades: 458 (36.7%)
+
+Profit Factor: 2.31
+Avg Trade: $87.56
+Avg Winner: $203.45
+Avg Loser: -$89.32
+
+Max Drawdown: 3.24%
+Sharpe Ratio: 2.87
+Sortino Ratio: 3.45
+Calmar Ratio: 4.12
+
+Maker Ratio: 76.3%
+Total Volume: 12,470 contracts
+```
+
+**Analysis:**
+- Strong win rate (63%)
+- Excellent profit factor (2.31)
+- Low drawdown (3.24%)
+- High Sharpe ratio (2.87)
+- Good maker ratio (76%)
+- Avg winner > Avg loser
+
+### Example Problematic Strategy
+
+```
+Total P&L: $12,340.00
+Realized P&L: $18,250.00
+Total Fees: $22,100.00
+Net P&L: -$9,760.00  ⚠️
+
+Num Trades: 3,142
+Winning Trades: 1,257 (40.0%)  ⚠️
+Losing Trades: 1,885 (60.0%)
+
+Profit Factor: 0.87  ⚠️
+Avg Trade: -$3.11
+Avg Winner: $45.23
+Avg Loser: -$68.92  ⚠️
+
+Max Drawdown: 18.45%  ⚠️
+Sharpe Ratio: 0.34  ⚠️
+Sortino Ratio: 0.42
+
+Maker Ratio: 23.1%  ⚠️
+```
+
+**Issues:**
+- Unprofitable after fees (profit factor < 1.0)
+- Low win rate with larger losers
+- High drawdown (18%)
+- Poor Sharpe ratio (0.34)
+- Too many taker fills (expensive)
+- Over-trading (fees > gross profit)
+
+## Metrics Summary Table
+
+| Metric | Good | Acceptable | Poor |
+|--------|------|------------|------|
+| **Profit Factor** | >2.0 | 1.5-2.0 | &lt;1.0 |
+| **Sharpe Ratio** | >2.0 | 1.0-2.0 | &lt;1.0 |
+| **Win Rate** | >55% | 45-55% | &lt;40% |
+| **Max Drawdown** | &lt;5% | 5-10% | >15% |
+| **Maker Ratio** (HFT) | >75% | 60-75% | &lt;50% |
+| **Calmar Ratio** | >3.0 | 1.5-3.0 | &lt;1.0 |
+
+## Exporting Results
+
+```rust
+use serde_json;
+use std::fs::File;
+
+// Export metrics to JSON
+let metrics_json = serde_json::to_string_pretty(&metrics)?;
+std::fs::write("backtest_metrics.json", metrics_json)?;
+
+// Export equity curve to CSV
+let mut writer = csv::Writer::from_path("equity_curve.csv")?;
+writer.write_record(&["timestamp", "pnl"])?;
+
+for (&ts, &pnl) in stats.equity_timestamps.iter().zip(stats.equity_curve.iter()) {
+    writer.write_record(&[ts.to_string(), pnl.to_string()])?;
+}
+writer.flush()?;
+```
+
+## Related
+
+- [Backtest Configuration](/backtesting/configuration) - Configure realistic simulations
+- [Running Backtests](/backtesting/running-backtests) - Execute and monitor backtests
+- [Risk Management](/core/risk-management) - Understand risk controls
