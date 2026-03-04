@@ -1,0 +1,146 @@
+{
+  "projectType": "framework",
+  "projectName": "NanoARB",
+  "projectDescription": "Nanosecond-level high-frequency trading framework for CME futures markets with ML-powered strategies and sub-microsecond latency.",
+  "theme": "aspen",
+  "primaryColor": "#FF6B35",
+  "lightColor": "#FFA726",
+  "darkColor": "#D84315",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/crates",
+              "architecture/data-flow"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/order-books",
+              "concepts/price-types",
+              "concepts/strategies",
+              "concepts/event-driven"
+            ]
+          },
+          {
+            "group": "Building Strategies",
+            "pages": [
+              "strategies/strategy-trait",
+              "strategies/market-making",
+              "strategies/signal-generation",
+              "strategies/rl-strategies"
+            ]
+          },
+          {
+            "group": "Backtesting",
+            "pages": [
+              "backtesting/configuration",
+              "backtesting/running-backtests",
+              "backtesting/performance-metrics"
+            ]
+          },
+          {
+            "group": "Data & Features",
+            "pages": [
+              "data/market-data-feeds",
+              "data/feature-extraction",
+              "data/ml-integration"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/monitoring",
+              "deployment/production"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/core/types",
+              "api/core/traits",
+              "api/core/errors"
+            ]
+          },
+          {
+            "group": "Strategy",
+            "pages": [
+              "api/strategy/base",
+              "api/strategy/market-maker",
+              "api/strategy/signals"
+            ]
+          },
+          {
+            "group": "Backtest",
+            "pages": [
+              "api/backtest/engine",
+              "api/backtest/config",
+              "api/backtest/metrics"
+            ]
+          },
+          {
+            "group": "Order Book",
+            "pages": [
+              "api/lob/orderbook",
+              "api/lob/features"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "api/config/trading",
+              "api/config/risk",
+              "api/config/latency"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Sub-microsecond tick-to-trade latency (<800ns)",
+    "Production Rust codebase with zero Python at runtime",
+    "Mamba State Space Models 10-50x faster than Transformers",
+    "Event-driven backtesting with realistic latency simulation",
+    "RL-based market making (IQL and Decision Transformer)",
+    "CME MDP 3.0 binary protocol parser with zero-copy",
+    "20-level order book with O(log n) updates",
+    "Real-time Prometheus metrics and Grafana dashboards"
+  ],
+  "publicApiSurface": [
+    "nano_core::types::{Price, Quantity, Side, Timestamp, OrderId}",
+    "nano_core::traits::{Strategy, OrderBook, FillModel}",
+    "nano_lob::OrderBook::new()",
+    "nano_lob::OrderBook::apply_book_update()",
+    "nano_lob::LobFeatureExtractor::extract()",
+    "nano_strategy::market_maker::MarketMakerStrategy",
+    "nano_strategy::market_maker::MarketMakerConfig",
+    "nano_backtest::engine::BacktestEngine::new()",
+    "nano_backtest::engine::BacktestEngine::run()",
+    "nano_backtest::config::BacktestConfig",
+    "nano_feed::synthetic::SyntheticGenerator",
+    "nano_feed::MdpMessage::BookUpdate",
+    "nano_gateway::config::AppConfig",
+    "nano_gateway::server::start_metrics_server()"
+  ]
+}
